@@ -1,0 +1,234 @@
+import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, DataSource } from 'typeorm';
+import { InjectQueue } from '@nestjs/bull';
+import { Queue } from 'bull';
+import { v4 as uuidv4 } from 'uuid';
+
+import { Transaction, TransactionType, TransactionStatus } from './entities/transaction.entity';
+import { Wallet } from '../wallet/entities/wallet.entity';
+import { TransferDto } from './dto/transfer.dto';
+import { TransactionHistoryDto } from './dto/transaction-history.dto';
+
+export interface CreateTransactionData {
+  transactionId: string;
+  walletId: string;
+  targetWalletId?: string;
+  type: TransactionType;
+  amount: number;
+  description?: string;
+  currency?: string;
+  metadata?: Record<string, any>;
+}
+
+@Injectable()
+export class TransactionService {
+  constructor(
+    @InjectRepository(Transaction)
+    private readonly transactionRepository: Repository<Transaction>,
+    @InjectRepository(Wallet)
+    private readonly walletRepository: Repository<Wallet>,
+    private readonly dataSource: DataSource,
+    @InjectQueue('transactions') private transactionsQueue: Queue,
+  ) {}
+
+  async createTransaction(data: CreateTransactionData): Promise<Transaction> {
+    const transaction = this.transactionRepository.create({
+      ...data,
+      status: TransactionStatus.COMPLETED,
+    });
+
+    return await this.transactionRepository.save(transaction);
+  }
+
+  async transfer(transferDto: TransferDto): Promise<{ transaction: Transaction; fromWallet: Wallet; toWallet: Wallet }> {
+    const { fromWalletId, toWalletId, amount, description, currency, transactionId } = transferDto;
+
+    // Check if wallets are different
+    if (fromWalletId === toWalletId) {
+      throw new BadRequestException('Cannot transfer to the same wallet');
+    }
+
+    // Use provided transactionId or generate new one for idempotency
+    const finalTransactionId = transactionId || uuidv4();
+
+    // Check if transaction already exists (idempotency)
+    const existingTransaction = await this.transactionRepository.findOne({
+      where: { transactionId: finalTransactionId },
+    });
+
+    if (existingTransaction) {
+      if (existingTransaction.isCompleted()) {
+        // Return existing successful transaction
+        const fromWallet = await this.walletRepository.findOne({ where: { id: fromWalletId } });
+        const toWallet = await this.walletRepository.findOne({ where: { id: toWalletId } });
+        return { transaction: existingTransaction, fromWallet, toWallet };
+      } else if (existingTransaction.isFailed()) {
+        throw new BadRequestException('Previous transfer attempt failed');
+      }
+    }
+
+    return await this.dataSource.transaction(async (manager) => {
+      // Lock both wallets for update
+      const fromWallet = await manager
+        .createQueryBuilder(Wallet, 'wallet')
+        .setLock('pessimistic_write')
+        .where('wallet.id = :walletId', { walletId: fromWalletId })
+        .getOne();
+
+      const toWallet = await manager
+        .createQueryBuilder(Wallet, 'wallet')
+        .setLock('pessimistic_write')
+        .where('wallet.id = :walletId', { walletId: toWalletId })
+        .getOne();
+
+      if (!fromWallet) {
+        throw new NotFoundException('Source wallet not found');
+      }
+
+      if (!toWallet) {
+        throw new NotFoundException('Target wallet not found');
+      }
+
+      if (!fromWallet.canWithdraw(amount)) {
+        throw new BadRequestException('Insufficient funds or invalid source wallet status');
+      }
+
+      if (!toWallet.canDeposit(amount)) {
+        throw new BadRequestException('Invalid target wallet status');
+      }
+
+      // Create or update transaction record
+      let transaction: Transaction;
+      if (existingTransaction) {
+        transaction = existingTransaction;
+        transaction.status = TransactionStatus.PENDING;
+      } else {
+        transaction = this.transactionRepository.create({
+          transactionId: finalTransactionId,
+          walletId: fromWalletId,
+          targetWalletId: toWalletId,
+          type: TransactionType.TRANSFER,
+          amount,
+          description,
+          currency: currency || fromWallet.currency,
+          status: TransactionStatus.PENDING,
+        });
+      }
+
+      // Update wallet balances
+      fromWallet.subtractBalance(amount);
+      toWallet.addBalance(amount);
+
+      // Save all changes
+      await manager.save(fromWallet);
+      await manager.save(toWallet);
+      transaction.markAsCompleted();
+      await manager.save(transaction);
+
+      return { transaction, fromWallet, toWallet };
+    });
+  }
+
+  async getTransactionHistory(query: TransactionHistoryDto): Promise<{
+    transactions: Transaction[];
+    total: number;
+    page: number;
+    limit: number;
+    totalPages: number;
+  }> {
+    const { walletId, page = 1, limit = 20, type, status, startDate, endDate } = query;
+    const skip = (page - 1) * limit;
+
+    const queryBuilder = this.transactionRepository
+      .createQueryBuilder('transaction')
+      .where('transaction.walletId = :walletId', { walletId })
+      .orWhere('transaction.targetWalletId = :walletId', { walletId })
+      .orderBy('transaction.createdAt', 'DESC')
+      .skip(skip)
+      .take(limit);
+
+    if (type) {
+      queryBuilder.andWhere('transaction.type = :type', { type });
+    }
+
+    if (status) {
+      queryBuilder.andWhere('transaction.status = :status', { status });
+    }
+
+    if (startDate) {
+      queryBuilder.andWhere('transaction.createdAt >= :startDate', { startDate: new Date(startDate) });
+    }
+
+    if (endDate) {
+      queryBuilder.andWhere('transaction.createdAt <= :endDate', { endDate: new Date(endDate) });
+    }
+
+    const [transactions, total] = await queryBuilder.getManyAndCount();
+
+    return {
+      transactions,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+  }
+
+  async getTransaction(transactionId: string): Promise<Transaction> {
+    const transaction = await this.transactionRepository.findOne({
+      where: { transactionId },
+      relations: ['wallet', 'targetWallet'],
+    });
+
+    if (!transaction) {
+      throw new NotFoundException('Transaction not found');
+    }
+
+    return transaction;
+  }
+
+  async processTransferAsync(transferDto: TransferDto): Promise<void> {
+    // Add transfer to queue for async processing
+    await this.transactionsQueue.add('transfer', transferDto, {
+      attempts: 3,
+      backoff: {
+        type: 'exponential',
+        delay: 2000,
+      },
+      removeOnComplete: 100,
+      removeOnFail: 50,
+    });
+  }
+
+  async getTransactionStats(walletId: string): Promise<{
+    totalDeposits: number;
+    totalWithdrawals: number;
+    totalTransfers: number;
+    totalFees: number;
+  }> {
+    const stats = await this.transactionRepository
+      .createQueryBuilder('transaction')
+      .select([
+        'SUM(CASE WHEN transaction.type = :depositType THEN transaction.amount ELSE 0 END) as totalDeposits',
+        'SUM(CASE WHEN transaction.type = :withdrawalType THEN transaction.amount ELSE 0 END) as totalWithdrawals',
+        'SUM(CASE WHEN transaction.type = :transferType THEN transaction.amount ELSE 0 END) as totalTransfers',
+        'SUM(COALESCE(transaction.fee, 0)) as totalFees',
+      ])
+      .where('transaction.walletId = :walletId', { walletId })
+      .andWhere('transaction.status = :status', { status: TransactionStatus.COMPLETED })
+      .setParameters({
+        depositType: TransactionType.DEPOSIT,
+        withdrawalType: TransactionType.WITHDRAWAL,
+        transferType: TransactionType.TRANSFER,
+      })
+      .getRawOne();
+
+    return {
+      totalDeposits: parseFloat(stats.totalDeposits) || 0,
+      totalWithdrawals: parseFloat(stats.totalWithdrawals) || 0,
+      totalTransfers: parseFloat(stats.totalTransfers) || 0,
+      totalFees: parseFloat(stats.totalFees) || 0,
+    };
+  }
+} 

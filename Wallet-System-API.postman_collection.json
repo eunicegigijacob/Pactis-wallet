@@ -1,0 +1,546 @@
+{
+	"info": {
+		"_postman_id": "wallet-system-api-collection",
+		"name": "Wallet System API",
+		"description": "A comprehensive collection for testing the Wallet System API with all endpoints for wallet management and transactions.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Health Check",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/health",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"health"
+							]
+						},
+						"description": "Check if the API is running and healthy"
+					},
+					"response": []
+				}
+			],
+			"description": "Health monitoring endpoints"
+		},
+		{
+			"name": "Wallets",
+			"item": [
+				{
+					"name": "Create Wallet",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": \"user123\",\n  \"initialBalance\": 100.00,\n  \"currency\": \"USD\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wallets",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"wallets"
+							]
+						},
+						"description": "Create a new wallet for a user with optional initial balance"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Wallet by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/wallets/{{walletId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"wallets",
+								"{{walletId}}"
+							]
+						},
+						"description": "Retrieve wallet information by wallet ID"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Wallet by User ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/wallets/user/{{userId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"wallets",
+								"user",
+								"{{userId}}"
+							]
+						},
+						"description": "Retrieve wallet information by user ID"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Wallet Balance",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/wallets/{{walletId}}/balance",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"wallets",
+								"{{walletId}}",
+								"balance"
+							]
+						},
+						"description": "Get the current balance of a wallet"
+					},
+					"response": []
+				},
+				{
+					"name": "Deposit Funds",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"walletId\": \"{{walletId}}\",\n  \"amount\": 50.00,\n  \"description\": \"Salary deposit\",\n  \"currency\": \"USD\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wallets/deposit",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"wallets",
+								"deposit"
+							]
+						},
+						"description": "Deposit funds into a wallet with safe concurrency handling"
+					},
+					"response": []
+				},
+				{
+					"name": "Withdraw Funds",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"walletId\": \"{{walletId}}\",\n  \"amount\": 25.00,\n  \"description\": \"ATM withdrawal\",\n  \"currency\": \"USD\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wallets/withdraw",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"wallets",
+								"withdraw"
+							]
+						},
+						"description": "Withdraw funds from a wallet with overdraw prevention"
+					},
+					"response": []
+				},
+				{
+					"name": "Update Wallet Status",
+					"request": {
+						"method": "PUT",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"status\": \"suspended\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wallets/{{walletId}}/status",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"wallets",
+								"{{walletId}}",
+								"status"
+							]
+						},
+						"description": "Update wallet status (active, suspended, closed)"
+					},
+					"response": []
+				}
+			],
+			"description": "Wallet management endpoints"
+		},
+		{
+			"name": "Transactions",
+			"item": [
+				{
+					"name": "Transfer Funds",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"fromWalletId\": \"{{walletId}}\",\n  \"toWalletId\": \"{{targetWalletId}}\",\n  \"amount\": 100.00,\n  \"description\": \"Payment for services\",\n  \"currency\": \"USD\",\n  \"transactionId\": \"{{$guid}}\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/transactions/transfer",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"transactions",
+								"transfer"
+							]
+						},
+						"description": "Transfer funds between wallets with atomicity and idempotency"
+					},
+					"response": []
+				},
+				{
+					"name": "Async Transfer",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"fromWalletId\": \"{{walletId}}\",\n  \"toWalletId\": \"{{targetWalletId}}\",\n  \"amount\": 100.00,\n  \"description\": \"Async payment\",\n  \"currency\": \"USD\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/transactions/transfer/async",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"transactions",
+								"transfer",
+								"async"
+							]
+						},
+						"description": "Queue a transfer for asynchronous processing"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Transaction History",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/transactions/history?walletId={{walletId}}&page=1&limit=20&type=transfer&status=completed",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"transactions",
+								"history"
+							],
+							"query": [
+								{
+									"key": "walletId",
+									"value": "{{walletId}}",
+									"description": "Wallet ID to get history for"
+								},
+								{
+									"key": "page",
+									"value": "1",
+									"description": "Page number for pagination"
+								},
+								{
+									"key": "limit",
+									"value": "20",
+									"description": "Number of items per page"
+								},
+								{
+									"key": "type",
+									"value": "transfer",
+									"description": "Filter by transaction type (deposit, withdrawal, transfer)"
+								},
+								{
+									"key": "status",
+									"value": "completed",
+									"description": "Filter by transaction status (pending, completed, failed, cancelled)"
+								},
+								{
+									"key": "startDate",
+									"value": "",
+									"description": "Start date filter (ISO format)",
+									"disabled": true
+								},
+								{
+									"key": "endDate",
+									"value": "",
+									"description": "End date filter (ISO format)",
+									"disabled": true
+								}
+							]
+						},
+						"description": "Get paginated transaction history with filtering options"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Transaction by ID",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/transactions/{{transactionId}}",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"transactions",
+								"{{transactionId}}"
+							]
+						},
+						"description": "Get detailed information about a specific transaction"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Transaction Statistics",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{baseUrl}}/transactions/wallet/{{walletId}}/stats",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"transactions",
+								"wallet",
+								"{{walletId}}",
+								"stats"
+							]
+						},
+						"description": "Get transaction statistics for a wallet (totals, fees, etc.)"
+					},
+					"response": []
+				}
+			],
+			"description": "Transaction management endpoints"
+		},
+		{
+			"name": "Testing Scenarios",
+			"item": [
+				{
+					"name": "Complete Wallet Flow",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"exec": [
+									"// This is a test script that demonstrates a complete wallet flow",
+									"// 1. Create wallet",
+									"// 2. Deposit funds",
+									"// 3. Check balance",
+									"// 4. Withdraw funds",
+									"// 5. Transfer funds",
+									"",
+									"console.log('Starting complete wallet flow test...');",
+									"",
+									"// Test wallet creation",
+									"pm.test('Wallet created successfully', function () {",
+									"    pm.response.to.have.status(201);",
+									"    const response = pm.response.json();",
+									"    pm.expect(response.id).to.be.a('string');",
+									"    pm.expect(response.userId).to.eql('test-user');",
+									"    pm.expect(response.balance).to.eql(100);",
+									"    ",
+									"    // Store wallet ID for subsequent requests",
+									"    pm.environment.set('walletId', response.id);",
+									"});"
+								],
+								"type": "text/javascript"
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"userId\": \"test-user\",\n  \"initialBalance\": 100.00,\n  \"currency\": \"USD\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wallets",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"wallets"
+							]
+						},
+						"description": "Test the complete wallet creation and management flow"
+					},
+					"response": []
+				},
+				{
+					"name": "Concurrent Operations Test",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"walletId\": \"{{walletId}}\",\n  \"amount\": 10.00,\n  \"description\": \"Concurrent deposit test\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/wallets/deposit",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"wallets",
+								"deposit"
+							]
+						},
+						"description": "Test concurrent deposit operations (run multiple instances)"
+					},
+					"response": []
+				},
+				{
+					"name": "Idempotency Test",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"fromWalletId\": \"{{walletId}}\",\n  \"toWalletId\": \"{{targetWalletId}}\",\n  \"amount\": 50.00,\n  \"description\": \"Idempotency test\",\n  \"transactionId\": \"test-transaction-123\"\n}"
+						},
+						"url": {
+							"raw": "{{baseUrl}}/transactions/transfer",
+							"host": [
+								"{{baseUrl}}"
+							],
+							"path": [
+								"transactions",
+								"transfer"
+							]
+						},
+						"description": "Test idempotency by sending the same transaction multiple times"
+					},
+					"response": []
+				}
+			],
+			"description": "Pre-configured test scenarios for validating API functionality"
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					"// Pre-request script to set up common headers or variables",
+					"console.log('Making request to: ' + pm.request.url);"
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					"// Global test script for common validations",
+					"pm.test('Response time is less than 2000ms', function () {",
+					"    pm.expect(pm.response.responseTime).to.be.below(2000);",
+					"});",
+					"",
+					"pm.test('Response has valid JSON', function () {",
+					"    pm.response.to.be.json;",
+					"});"
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "baseUrl",
+			"value": "http://localhost:3000/api/v1",
+			"type": "string"
+		},
+		{
+			"key": "walletId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "targetWalletId",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "userId",
+			"value": "test-user-123",
+			"type": "string"
+		},
+		{
+			"key": "transactionId",
+			"value": "",
+			"type": "string"
+		}
+	]
+} 
