@@ -53,10 +53,27 @@ export class Transaction {
   })
   status: TransactionStatus;
 
-  @Column({ type: "decimal", precision: 15, scale: 2 })
+  @Column({
+    type: "decimal",
+    precision: 15,
+    scale: 2,
+    transformer: {
+      to: (value: number) => value,
+      from: (value: string) => parseFloat(value),
+    },
+  })
   amount: number;
 
-  @Column({ type: "decimal", precision: 15, scale: 2, nullable: true })
+  @Column({
+    type: "decimal",
+    precision: 15,
+    scale: 2,
+    nullable: true,
+    transformer: {
+      to: (value: number) => value,
+      from: (value: string) => (value ? parseFloat(value) : null),
+    },
+  })
   fee: number;
 
   @Column({ type: "varchar", length: 255, nullable: true })

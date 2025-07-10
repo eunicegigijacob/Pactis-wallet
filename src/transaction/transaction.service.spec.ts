@@ -124,7 +124,8 @@ describe("TransactionService", () => {
         balance: 400,
         subtractBalance: jest.fn(),
         addBalance: jest.fn(),
-        // add any other required properties with dummy values
+        canWithdraw: jest.fn().mockReturnValue(true),
+        canDeposit: jest.fn().mockReturnValue(true),
       };
       const toWallet = {
         id: "wallet2",
@@ -136,7 +137,8 @@ describe("TransactionService", () => {
         balance: 300,
         subtractBalance: jest.fn(),
         addBalance: jest.fn(),
-        // add any other required properties with dummy values
+        canWithdraw: jest.fn().mockReturnValue(true),
+        canDeposit: jest.fn().mockReturnValue(true),
       };
 
       const mockTransaction = new Transaction();
@@ -177,9 +179,11 @@ describe("TransactionService", () => {
       );
       expect(toWallet.addBalance).toHaveBeenCalledWith(transferDto.amount);
       expect(mockTransaction.markAsCompleted).toHaveBeenCalled();
-      expect(result.transaction).toEqual(mockTransaction);
-      expect(result.fromWallet).toEqual(fromWallet);
-      expect(result.toWallet).toEqual(toWallet);
+      expect(result.status).toBe(true);
+      expect(result.message).toBe("Transfer completed successfully");
+      expect(result.data.transaction).toEqual(mockTransaction);
+      expect(result.data.fromWallet).toEqual(fromWallet);
+      expect(result.data.toWallet).toEqual(toWallet);
     });
 
     it("should throw BadRequestException if wallets are the same", async () => {
@@ -242,7 +246,9 @@ describe("TransactionService", () => {
       expect(transactionRepository.createQueryBuilder).toHaveBeenCalledWith(
         "transaction"
       );
-      expect(result).toEqual({
+      expect(result.status).toBe(true);
+      expect(result.message).toBe("Transaction history retrieved successfully");
+      expect(result.data).toEqual({
         transactions: mockTransactions,
         total: 2,
         page: 1,
@@ -269,7 +275,9 @@ describe("TransactionService", () => {
         where: { transactionId },
         relations: ["wallet", "targetWallet"],
       });
-      expect(result).toEqual(mockTransaction);
+      expect(result.status).toBe(true);
+      expect(result.message).toBe("Transaction retrieved successfully");
+      expect(result.data).toEqual(mockTransaction);
     });
 
     it("should throw NotFoundException if transaction not found", async () => {
@@ -315,7 +323,11 @@ describe("TransactionService", () => {
       expect(transactionRepository.createQueryBuilder).toHaveBeenCalledWith(
         "transaction"
       );
-      expect(result).toEqual({
+      expect(result.status).toBe(true);
+      expect(result.message).toBe(
+        "Transaction statistics retrieved successfully"
+      );
+      expect(result.data).toEqual({
         totalDeposits: 1000,
         totalWithdrawals: 500,
         totalTransfers: 200,
@@ -356,7 +368,9 @@ describe("TransactionService", () => {
       expect(transactionRepository.createQueryBuilder).toHaveBeenCalledWith(
         "transaction"
       );
-      expect(result).toEqual({
+      expect(result.status).toBe(true);
+      expect(result.message).toBe("Failed transactions retrieved successfully");
+      expect(result.data).toEqual({
         items: mockTransactions,
         pagination: {
           page,
@@ -401,7 +415,11 @@ describe("TransactionService", () => {
       expect(transactionRepository.createQueryBuilder).toHaveBeenCalledWith(
         "transaction"
       );
-      expect(result).toEqual({
+      expect(result.status).toBe(true);
+      expect(result.message).toBe(
+        "Pending transactions retrieved successfully"
+      );
+      expect(result.data).toEqual({
         items: mockTransactions,
         pagination: {
           page,
@@ -455,7 +473,9 @@ describe("TransactionService", () => {
       expect(transactionRepository.createQueryBuilder).toHaveBeenCalledWith(
         "transaction"
       );
-      expect(result).toEqual({
+      expect(result.status).toBe(true);
+      expect(result.message).toBe("Transactions retrieved successfully");
+      expect(result.data).toEqual({
         items: mockTransactions,
         pagination: {
           page,
@@ -465,6 +485,40 @@ describe("TransactionService", () => {
           hasNext: false,
           hasPrev: false,
         },
+      });
+    });
+  });
+
+  describe("processTransferAsync", () => {
+    it("should queue transfer for async processing", async () => {
+      const transferDto: TransferDto = {
+        fromWalletId: "wallet1",
+        toWalletId: "wallet2",
+        amount: 100,
+        description: "Test async transfer",
+      };
+
+      transactionsQueue.add.mockResolvedValue(undefined);
+
+      const result = await service.processTransferAsync(transferDto);
+
+      expect(transactionsQueue.add).toHaveBeenCalledWith(
+        "transfer",
+        transferDto,
+        {
+          attempts: 3,
+          backoff: {
+            type: "exponential",
+            delay: 2000,
+          },
+          removeOnComplete: 100,
+          removeOnFail: 50,
+        }
+      );
+      expect(result.status).toBe(true);
+      expect(result.message).toBe("Transfer queued for processing");
+      expect(result.data).toEqual({
+        message: "Transfer queued for processing",
       });
     });
   });

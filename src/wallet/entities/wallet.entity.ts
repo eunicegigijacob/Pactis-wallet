@@ -25,7 +25,16 @@ export class Wallet {
   @Column({ type: "varchar", length: 255 })
   userId: string;
 
-  @Column({ type: "decimal", precision: 15, scale: 2, default: 0 })
+  @Column({
+    type: "decimal",
+    precision: 15,
+    scale: 2,
+    default: 0,
+    transformer: {
+      to: (value: number) => value,
+      from: (value: string) => parseFloat(value),
+    },
+  })
   balance: number;
 
   @Column({
@@ -61,10 +70,12 @@ export class Wallet {
   }
 
   addBalance(amount: number): void {
-    this.balance += amount;
+    // Ensure proper decimal arithmetic
+    this.balance = Math.round((this.balance + amount) * 100) / 100;
   }
 
   subtractBalance(amount: number): void {
-    this.balance -= amount;
+    // Ensure proper decimal arithmetic
+    this.balance = Math.round((this.balance - amount) * 100) / 100;
   }
 }

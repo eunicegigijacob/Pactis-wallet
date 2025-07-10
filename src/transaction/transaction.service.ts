@@ -18,6 +18,7 @@ import {
 import { Wallet } from "../wallet/entities/wallet.entity";
 import { TransferDto } from "./dto/transfer.dto";
 import { TransactionHistoryDto } from "./dto/transaction-history.dto";
+import { ApiResponse } from "../common/interfaces/api-response.interface";
 
 export interface CreateTransactionData {
   transactionId: string;
@@ -50,13 +51,13 @@ export class TransactionService {
     return await this.transactionRepository.save(transaction);
   }
 
-  async transfer(
-    transferDto: TransferDto
-  ): Promise<{
-    transaction: Transaction;
-    fromWallet: Wallet;
-    toWallet: Wallet;
-  }> {
+  async transfer(transferDto: TransferDto): Promise<
+    ApiResponse<{
+      transaction: Transaction;
+      fromWallet: Wallet;
+      toWallet: Wallet;
+    }>
+  > {
     const {
       fromWalletId,
       toWalletId,
@@ -88,13 +89,17 @@ export class TransactionService {
         const toWallet = await this.walletRepository.findOne({
           where: { id: toWalletId },
         });
-        return { transaction: existingTransaction, fromWallet, toWallet };
+        return {
+          status: true,
+          message: "Transfer completed successfully (idempotent)",
+          data: { transaction: existingTransaction, fromWallet, toWallet },
+        };
       } else if (existingTransaction.isFailed()) {
         throw new BadRequestException("Previous transfer attempt failed");
       }
     }
 
-    return await this.dataSource.transaction(async (manager) => {
+    const result = await this.dataSource.transaction(async (manager) => {
       // Lock both wallets for update
       const fromWallet = await manager
         .createQueryBuilder(Wallet, "wallet")
@@ -156,15 +161,23 @@ export class TransactionService {
 
       return { transaction, fromWallet, toWallet };
     });
+
+    return {
+      status: true,
+      message: "Transfer completed successfully",
+      data: result,
+    };
   }
 
-  async getTransactionHistory(query: TransactionHistoryDto): Promise<{
-    transactions: Transaction[];
-    total: number;
-    page: number;
-    limit: number;
-    totalPages: number;
-  }> {
+  async getTransactionHistory(query: TransactionHistoryDto): Promise<
+    ApiResponse<{
+      transactions: Transaction[];
+      total: number;
+      page: number;
+      limit: number;
+      totalPages: number;
+    }>
+  > {
     const {
       walletId,
       page = 1,
@@ -207,15 +220,21 @@ export class TransactionService {
     const [transactions, total] = await queryBuilder.getManyAndCount();
 
     return {
-      transactions,
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit),
+      status: true,
+      message: "Transaction history retrieved successfully",
+      data: {
+        transactions,
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
     };
   }
 
-  async getTransaction(transactionId: string): Promise<Transaction> {
+  async getTransaction(
+    transactionId: string
+  ): Promise<ApiResponse<Transaction>> {
     const transaction = await this.transactionRepository.findOne({
       where: { transactionId },
       relations: ["wallet", "targetWallet"],
@@ -225,10 +244,16 @@ export class TransactionService {
       throw new NotFoundException("Transaction not found");
     }
 
-    return transaction;
+    return {
+      status: true,
+      message: "Transaction retrieved successfully",
+      data: transaction,
+    };
   }
 
-  async processTransferAsync(transferDto: TransferDto): Promise<void> {
+  async processTransferAsync(
+    transferDto: TransferDto
+  ): Promise<ApiResponse<{ message: string }>> {
     // Add transfer to queue for async processing
     await this.transactionsQueue.add("transfer", transferDto, {
       attempts: 3,
@@ -239,14 +264,22 @@ export class TransactionService {
       removeOnComplete: 100,
       removeOnFail: 50,
     });
+
+    return {
+      status: true,
+      message: "Transfer queued for processing",
+      data: { message: "Transfer queued for processing" },
+    };
   }
 
-  async getTransactionStats(walletId: string): Promise<{
-    totalDeposits: number;
-    totalWithdrawals: number;
-    totalTransfers: number;
-    totalFees: number;
-  }> {
+  async getTransactionStats(walletId: string): Promise<
+    ApiResponse<{
+      totalDeposits: number;
+      totalWithdrawals: number;
+      totalTransfers: number;
+      totalFees: number;
+    }>
+  > {
     const stats = await this.transactionRepository
       .createQueryBuilder("transaction")
       .select([
@@ -267,27 +300,33 @@ export class TransactionService {
       .getRawOne();
 
     return {
-      totalDeposits: parseFloat(stats.totalDeposits) || 0,
-      totalWithdrawals: parseFloat(stats.totalWithdrawals) || 0,
-      totalTransfers: parseFloat(stats.totalTransfers) || 0,
-      totalFees: parseFloat(stats.totalFees) || 0,
+      status: true,
+      message: "Transaction statistics retrieved successfully",
+      data: {
+        totalDeposits: parseFloat(stats.totalDeposits) || 0,
+        totalWithdrawals: parseFloat(stats.totalWithdrawals) || 0,
+        totalTransfers: parseFloat(stats.totalTransfers) || 0,
+        totalFees: parseFloat(stats.totalFees) || 0,
+      },
     };
   }
 
   async getFailedTransactions(
     page: number = 1,
     limit: number = 20
-  ): Promise<{
-    items: Transaction[];
-    pagination: {
-      page: number;
-      limit: number;
-      total: number;
-      totalPages: number;
-      hasNext: boolean;
-      hasPrev: boolean;
-    };
-  }> {
+  ): Promise<
+    ApiResponse<{
+      items: Transaction[];
+      pagination: {
+        page: number;
+        limit: number;
+        total: number;
+        totalPages: number;
+        hasNext: boolean;
+        hasPrev: boolean;
+      };
+    }>
+  > {
     const skip = (page - 1) * limit;
 
     const queryBuilder = this.transactionRepository
@@ -303,14 +342,18 @@ export class TransactionService {
     const totalPages = Math.ceil(total / limit);
 
     return {
-      items,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages,
-        hasNext: page < totalPages,
-        hasPrev: page > 1,
+      status: true,
+      message: "Failed transactions retrieved successfully",
+      data: {
+        items,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages,
+          hasNext: page < totalPages,
+          hasPrev: page > 1,
+        },
       },
     };
   }
@@ -318,17 +361,19 @@ export class TransactionService {
   async getPendingTransactions(
     page: number = 1,
     limit: number = 20
-  ): Promise<{
-    items: Transaction[];
-    pagination: {
-      page: number;
-      limit: number;
-      total: number;
-      totalPages: number;
-      hasNext: boolean;
-      hasPrev: boolean;
-    };
-  }> {
+  ): Promise<
+    ApiResponse<{
+      items: Transaction[];
+      pagination: {
+        page: number;
+        limit: number;
+        total: number;
+        totalPages: number;
+        hasNext: boolean;
+        hasPrev: boolean;
+      };
+    }>
+  > {
     const skip = (page - 1) * limit;
 
     const queryBuilder = this.transactionRepository
@@ -344,14 +389,18 @@ export class TransactionService {
     const totalPages = Math.ceil(total / limit);
 
     return {
-      items,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages,
-        hasNext: page < totalPages,
-        hasPrev: page > 1,
+      status: true,
+      message: "Pending transactions retrieved successfully",
+      data: {
+        items,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages,
+          hasNext: page < totalPages,
+          hasPrev: page > 1,
+        },
       },
     };
   }
@@ -361,17 +410,19 @@ export class TransactionService {
     endDate: string,
     page: number = 1,
     limit: number = 20
-  ): Promise<{
-    items: Transaction[];
-    pagination: {
-      page: number;
-      limit: number;
-      total: number;
-      totalPages: number;
-      hasNext: boolean;
-      hasPrev: boolean;
-    };
-  }> {
+  ): Promise<
+    ApiResponse<{
+      items: Transaction[];
+      pagination: {
+        page: number;
+        limit: number;
+        total: number;
+        totalPages: number;
+        hasNext: boolean;
+        hasPrev: boolean;
+      };
+    }>
+  > {
     const skip = (page - 1) * limit;
 
     const queryBuilder = this.transactionRepository
@@ -390,14 +441,18 @@ export class TransactionService {
     const totalPages = Math.ceil(total / limit);
 
     return {
-      items,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages,
-        hasNext: page < totalPages,
-        hasPrev: page > 1,
+      status: true,
+      message: "Transactions retrieved successfully",
+      data: {
+        items,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages,
+          hasNext: page < totalPages,
+          hasPrev: page > 1,
+        },
       },
     };
   }
