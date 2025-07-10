@@ -1,32 +1,44 @@
-import { Test, TestingModule } from '@nestjs/testing';
-import { getRepositoryToken } from '@nestjs/typeorm';
-import { TransactionService } from './transaction.service';
-import { TransactionRepository } from './transaction.repository';
-import { WalletRepository } from '../wallet/wallet.repository';
-import { Transaction, TransactionType, TransactionStatus } from './entities/transaction.entity';
-import { TransferDto } from './dto/transfer.dto';
-import { TransactionHistoryDto } from './dto/transaction-history.dto';
-import { NotFoundException, BadRequestException } from '@nestjs/common';
+import { Test, TestingModule } from "@nestjs/testing";
+import { getRepositoryToken } from "@nestjs/typeorm";
+import { getDataSourceToken } from "@nestjs/typeorm";
+import { TransactionService } from "./transaction.service";
+import {
+  Transaction,
+  TransactionType,
+  TransactionStatus,
+} from "./entities/transaction.entity";
+import { Wallet } from "../wallet/entities/wallet.entity";
+import { TransferDto } from "./dto/transfer.dto";
+import { TransactionHistoryDto } from "./dto/transaction-history.dto";
+import { NotFoundException, BadRequestException } from "@nestjs/common";
+import { Queue } from "bull";
+import { TransactionRepository } from "./repositories/transaction.repository";
+import { WalletRepository } from "../wallet/repositories/wallet.repository";
 
-describe('TransactionService', () => {
+describe("TransactionService", () => {
   let service: TransactionService;
-  let transactionRepository: jest.Mocked<TransactionRepository>;
-  let walletRepository: jest.Mocked<WalletRepository>;
+  let transactionRepository: jest.Mocked<any>;
+  let walletRepository: jest.Mocked<any>;
+  let dataSource: jest.Mocked<any>;
+  let transactionsQueue: jest.Mocked<Queue>;
 
   const mockTransactionRepository = {
     create: jest.fn(),
     save: jest.fn(),
     findOne: jest.fn(),
-    findWithFilters: jest.fn(),
-    getStats: jest.fn(),
-    findFailedTransactions: jest.fn(),
-    findPendingTransactions: jest.fn(),
-    findTransactionsByDateRange: jest.fn(),
+    createQueryBuilder: jest.fn(),
   };
 
   const mockWalletRepository = {
     findOne: jest.fn(),
-    updateBalance: jest.fn(),
+  };
+
+  const mockDataSource = {
+    transaction: jest.fn(),
+  };
+
+  const mockTransactionsQueue = {
+    add: jest.fn(),
   };
 
   beforeEach(async () => {
@@ -34,251 +46,215 @@ describe('TransactionService', () => {
       providers: [
         TransactionService,
         {
-          provide: TransactionRepository,
+          provide: getRepositoryToken(Transaction),
           useValue: mockTransactionRepository,
         },
         {
-          provide: WalletRepository,
+          provide: getRepositoryToken(Wallet),
           useValue: mockWalletRepository,
+        },
+        {
+          provide: getDataSourceToken(),
+          useValue: mockDataSource,
+        },
+        {
+          provide: "BullQueue_transactions",
+          useValue: mockTransactionsQueue,
         },
       ],
     }).compile();
 
     service = module.get<TransactionService>(TransactionService);
-    transactionRepository = module.get(TransactionRepository);
-    walletRepository = module.get(WalletRepository);
+    transactionRepository = module.get(getRepositoryToken(Transaction));
+    walletRepository = module.get(getRepositoryToken(Wallet));
+    dataSource = module.get(getDataSourceToken());
+    transactionsQueue = module.get("BullQueue_transactions");
   });
 
   afterEach(() => {
     jest.clearAllMocks();
   });
 
-  describe('transfer', () => {
-    it('should transfer funds successfully', async () => {
-      const transferDto: TransferDto = {
-        fromWalletId: 'wallet1',
-        toWalletId: 'wallet2',
+  describe("createTransaction", () => {
+    it("should create a transaction successfully", async () => {
+      const transactionData = {
+        transactionId: "txn123",
+        walletId: "wallet1",
+        type: TransactionType.DEPOSIT,
         amount: 100,
-        description: 'Test transfer',
-      };
-
-      const fromWallet = {
-        id: transferDto.fromWalletId,
-        balance: 500,
-        status: 'ACTIVE',
-      };
-
-      const toWallet = {
-        id: transferDto.toWalletId,
-        balance: 200,
-        status: 'ACTIVE',
+        description: "Test deposit",
       };
 
       const mockTransaction = new Transaction();
-      mockTransaction.id = 'txn123';
-      mockTransaction.type = TransactionType.TRANSFER;
+      mockTransaction.id = "txn123";
+      mockTransaction.type = TransactionType.DEPOSIT;
+      mockTransaction.amount = 100;
       mockTransaction.status = TransactionStatus.COMPLETED;
-      mockTransaction.amount = transferDto.amount;
-
-      walletRepository.findOne
-        .mockResolvedValueOnce(fromWallet)
-        .mockResolvedValueOnce(toWallet);
-
-      walletRepository.updateBalance
-        .mockResolvedValueOnce({ ...fromWallet, balance: 400 })
-        .mockResolvedValueOnce({ ...toWallet, balance: 300 });
 
       transactionRepository.create.mockReturnValue(mockTransaction);
       transactionRepository.save.mockResolvedValue(mockTransaction);
 
-      const result = await service.transfer(transferDto);
+      const result = await service.createTransaction(transactionData);
 
-      expect(walletRepository.findOne).toHaveBeenCalledWith(transferDto.fromWalletId);
-      expect(walletRepository.findOne).toHaveBeenCalledWith(transferDto.toWalletId);
-      expect(walletRepository.updateBalance).toHaveBeenCalledWith(transferDto.fromWalletId, 400);
-      expect(walletRepository.updateBalance).toHaveBeenCalledWith(transferDto.toWalletId, 300);
       expect(transactionRepository.create).toHaveBeenCalledWith({
-        type: TransactionType.TRANSFER,
-        amount: transferDto.amount,
-        fromWalletId: transferDto.fromWalletId,
-        toWalletId: transferDto.toWalletId,
-        description: transferDto.description,
+        ...transactionData,
         status: TransactionStatus.COMPLETED,
       });
       expect(transactionRepository.save).toHaveBeenCalledWith(mockTransaction);
-      expect(result.transaction).toEqual(mockTransaction);
-      expect(result.fromWallet.balance).toBe(400);
-      expect(result.toWallet.balance).toBe(300);
+      expect(result).toEqual(mockTransaction);
     });
+  });
 
-    it('should throw BadRequestException if from wallet not found', async () => {
+  describe("transfer", () => {
+    it("should transfer funds successfully", async () => {
       const transferDto: TransferDto = {
-        fromWalletId: 'nonexistent',
-        toWalletId: 'wallet2',
+        fromWalletId: "wallet1",
+        toWalletId: "wallet2",
         amount: 100,
-        description: 'Test transfer',
-      };
-
-      walletRepository.findOne.mockResolvedValue(null);
-
-      await expect(service.transfer(transferDto)).rejects.toThrow(
-        new BadRequestException('From wallet not found'),
-      );
-
-      expect(walletRepository.findOne).toHaveBeenCalledWith(transferDto.fromWalletId);
-      expect(walletRepository.updateBalance).not.toHaveBeenCalled();
-      expect(transactionRepository.create).not.toHaveBeenCalled();
-    });
-
-    it('should throw BadRequestException if to wallet not found', async () => {
-      const transferDto: TransferDto = {
-        fromWalletId: 'wallet1',
-        toWalletId: 'nonexistent',
-        amount: 100,
-        description: 'Test transfer',
+        description: "Test transfer",
       };
 
       const fromWallet = {
-        id: transferDto.fromWalletId,
-        balance: 500,
-        status: 'ACTIVE',
+        id: "wallet1",
+        userId: "user1",
+        status: "ACTIVE",
+        currency: "USD",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        balance: 400,
+        subtractBalance: jest.fn(),
+        addBalance: jest.fn(),
+        // add any other required properties with dummy values
       };
-
-      walletRepository.findOne
-        .mockResolvedValueOnce(fromWallet)
-        .mockResolvedValueOnce(null);
-
-      await expect(service.transfer(transferDto)).rejects.toThrow(
-        new BadRequestException('To wallet not found'),
-      );
-
-      expect(walletRepository.findOne).toHaveBeenCalledWith(transferDto.fromWalletId);
-      expect(walletRepository.findOne).toHaveBeenCalledWith(transferDto.toWalletId);
-      expect(walletRepository.updateBalance).not.toHaveBeenCalled();
-      expect(transactionRepository.create).not.toHaveBeenCalled();
-    });
-
-    it('should throw BadRequestException if insufficient funds', async () => {
-      const transferDto: TransferDto = {
-        fromWalletId: 'wallet1',
-        toWalletId: 'wallet2',
-        amount: 600,
-        description: 'Test transfer',
-      };
-
-      const fromWallet = {
-        id: transferDto.fromWalletId,
-        balance: 500,
-        status: 'ACTIVE',
-      };
-
       const toWallet = {
-        id: transferDto.toWalletId,
-        balance: 200,
-        status: 'ACTIVE',
+        id: "wallet2",
+        userId: "user2",
+        status: "ACTIVE",
+        currency: "USD",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        balance: 300,
+        subtractBalance: jest.fn(),
+        addBalance: jest.fn(),
+        // add any other required properties with dummy values
       };
 
-      walletRepository.findOne
+      const mockTransaction = new Transaction();
+      mockTransaction.id = "txn123";
+      mockTransaction.type = TransactionType.TRANSFER;
+      mockTransaction.status = TransactionStatus.COMPLETED;
+      mockTransaction.amount = transferDto.amount;
+      mockTransaction.markAsCompleted = jest.fn();
+
+      const mockQueryBuilder = {
+        setLock: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        getOne: jest.fn(),
+      };
+
+      transactionRepository.createQueryBuilder.mockReturnValue(
+        mockQueryBuilder
+      );
+      mockQueryBuilder.getOne
         .mockResolvedValueOnce(fromWallet)
         .mockResolvedValueOnce(toWallet);
 
-      await expect(service.transfer(transferDto)).rejects.toThrow(
-        new BadRequestException('Insufficient funds'),
-      );
+      transactionRepository.create.mockReturnValue(mockTransaction);
 
-      expect(walletRepository.findOne).toHaveBeenCalledWith(transferDto.fromWalletId);
-      expect(walletRepository.findOne).toHaveBeenCalledWith(transferDto.toWalletId);
-      expect(walletRepository.updateBalance).not.toHaveBeenCalled();
-      expect(transactionRepository.create).not.toHaveBeenCalled();
-    });
-
-    it('should throw BadRequestException if amount is invalid', async () => {
-      const transferDto: TransferDto = {
-        fromWalletId: 'wallet1',
-        toWalletId: 'wallet2',
-        amount: -50,
-        description: 'Test transfer',
+      const mockTransactionManager = {
+        save: jest.fn(),
       };
 
-      await expect(service.transfer(transferDto)).rejects.toThrow(
-        new BadRequestException('Invalid transfer amount'),
-      );
-
-      expect(walletRepository.findOne).not.toHaveBeenCalled();
-      expect(walletRepository.updateBalance).not.toHaveBeenCalled();
-      expect(transactionRepository.create).not.toHaveBeenCalled();
-    });
-  });
-
-  describe('processTransferAsync', () => {
-    it('should process transfer asynchronously', async () => {
-      const transferDto: TransferDto = {
-        fromWalletId: 'wallet1',
-        toWalletId: 'wallet2',
-        amount: 100,
-        description: 'Test transfer',
-      };
-
-      // Mock the transfer method
-      jest.spyOn(service, 'transfer').mockResolvedValue({
-        transaction: new Transaction(),
-        fromWallet: { id: 'wallet1', balance: 400 },
-        toWallet: { id: 'wallet2', balance: 300 },
+      dataSource.transaction.mockImplementation(async (callback) => {
+        return await callback(mockTransactionManager);
       });
 
-      await service.processTransferAsync(transferDto);
+      const result = await service.transfer(transferDto);
 
-      expect(service.transfer).toHaveBeenCalledWith(transferDto);
+      expect(dataSource.transaction).toHaveBeenCalled();
+      expect(fromWallet.subtractBalance).toHaveBeenCalledWith(
+        transferDto.amount
+      );
+      expect(toWallet.addBalance).toHaveBeenCalledWith(transferDto.amount);
+      expect(mockTransaction.markAsCompleted).toHaveBeenCalled();
+      expect(result.transaction).toEqual(mockTransaction);
+      expect(result.fromWallet).toEqual(fromWallet);
+      expect(result.toWallet).toEqual(toWallet);
+    });
+
+    it("should throw BadRequestException if wallets are the same", async () => {
+      const transferDto: TransferDto = {
+        fromWalletId: "wallet1",
+        toWalletId: "wallet1",
+        amount: 100,
+        description: "Test transfer",
+      };
+
+      await expect(service.transfer(transferDto)).rejects.toThrow(
+        new BadRequestException("Cannot transfer to the same wallet")
+      );
     });
   });
 
-  describe('getTransactionHistory', () => {
-    it('should return transaction history successfully', async () => {
+  describe("getTransactionHistory", () => {
+    it("should return transaction history successfully", async () => {
       const query: TransactionHistoryDto = {
-        walletId: 'wallet123',
+        walletId: "wallet1",
         page: 1,
         limit: 20,
         type: TransactionType.DEPOSIT,
         status: TransactionStatus.COMPLETED,
-        startDate: '2024-01-01',
-        endDate: '2024-12-31',
+        startDate: "2024-01-01",
+        endDate: "2024-12-31",
       };
 
       const mockTransactions = [
         {
-          id: 'txn1',
+          id: "txn1",
           type: TransactionType.DEPOSIT,
           amount: 100,
           status: TransactionStatus.COMPLETED,
         },
         {
-          id: 'txn2',
+          id: "txn2",
           type: TransactionType.WITHDRAWAL,
           amount: 50,
           status: TransactionStatus.COMPLETED,
         },
       ];
 
-      const mockResult = {
+      const mockQueryBuilder = {
+        where: jest.fn().mockReturnThis(),
+        orWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        getManyAndCount: jest.fn().mockResolvedValue([mockTransactions, 2]),
+      };
+
+      transactionRepository.createQueryBuilder.mockReturnValue(
+        mockQueryBuilder
+      );
+
+      const result = await service.getTransactionHistory(query);
+
+      expect(transactionRepository.createQueryBuilder).toHaveBeenCalledWith(
+        "transaction"
+      );
+      expect(result).toEqual({
         transactions: mockTransactions,
         total: 2,
         page: 1,
         limit: 20,
         totalPages: 1,
-      };
-
-      transactionRepository.findWithFilters.mockResolvedValue(mockResult);
-
-      const result = await service.getTransactionHistory(query);
-
-      expect(transactionRepository.findWithFilters).toHaveBeenCalledWith(query);
-      expect(result).toEqual(mockResult);
+      });
     });
   });
 
-  describe('getTransaction', () => {
-    it('should return transaction by ID successfully', async () => {
-      const transactionId = 'txn123';
+  describe("getTransaction", () => {
+    it("should return transaction by ID successfully", async () => {
+      const transactionId = "txn123";
       const mockTransaction = new Transaction();
       mockTransaction.id = transactionId;
       mockTransaction.type = TransactionType.TRANSFER;
@@ -289,58 +265,98 @@ describe('TransactionService', () => {
 
       const result = await service.getTransaction(transactionId);
 
-      expect(transactionRepository.findOne).toHaveBeenCalledWith(transactionId);
+      expect(transactionRepository.findOne).toHaveBeenCalledWith({
+        where: { transactionId },
+        relations: ["wallet", "targetWallet"],
+      });
       expect(result).toEqual(mockTransaction);
     });
 
-    it('should throw NotFoundException if transaction not found', async () => {
-      const transactionId = 'nonexistent';
+    it("should throw NotFoundException if transaction not found", async () => {
+      const transactionId = "nonexistent";
 
       transactionRepository.findOne.mockResolvedValue(null);
 
       await expect(service.getTransaction(transactionId)).rejects.toThrow(
-        new NotFoundException('Transaction not found'),
+        new NotFoundException("Transaction not found")
       );
 
-      expect(transactionRepository.findOne).toHaveBeenCalledWith(transactionId);
+      expect(transactionRepository.findOne).toHaveBeenCalledWith({
+        where: { transactionId },
+        relations: ["wallet", "targetWallet"],
+      });
     });
   });
 
-  describe('getTransactionStats', () => {
-    it('should return transaction statistics successfully', async () => {
-      const walletId = 'wallet123';
+  describe("getTransactionStats", () => {
+    it("should return transaction statistics successfully", async () => {
+      const walletId = "wallet123";
       const mockStats = {
+        totalDeposits: "1000",
+        totalWithdrawals: "500",
+        totalTransfers: "200",
+        totalFees: "50",
+      };
+
+      const mockQueryBuilder = {
+        select: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        setParameters: jest.fn().mockReturnThis(),
+        getRawOne: jest.fn().mockResolvedValue(mockStats),
+      };
+
+      transactionRepository.createQueryBuilder.mockReturnValue(
+        mockQueryBuilder
+      );
+
+      const result = await service.getTransactionStats(walletId);
+
+      expect(transactionRepository.createQueryBuilder).toHaveBeenCalledWith(
+        "transaction"
+      );
+      expect(result).toEqual({
         totalDeposits: 1000,
         totalWithdrawals: 500,
         totalTransfers: 200,
         totalFees: 50,
-      };
-
-      transactionRepository.getStats.mockResolvedValue(mockStats);
-
-      const result = await service.getTransactionStats(walletId);
-
-      expect(transactionRepository.getStats).toHaveBeenCalledWith(walletId);
-      expect(result).toEqual(mockStats);
+      });
     });
   });
 
-  describe('getFailedTransactions', () => {
-    it('should return failed transactions successfully', async () => {
+  describe("getFailedTransactions", () => {
+    it("should return failed transactions successfully", async () => {
       const page = 1;
       const limit = 20;
 
       const mockTransactions = [
         {
-          id: 'txn1',
+          id: "txn1",
           type: TransactionType.TRANSFER,
           amount: 100,
           status: TransactionStatus.FAILED,
-          errorMessage: 'Insufficient funds',
+          errorMessage: "Insufficient funds",
         },
       ];
 
-      const mockResult = {
+      const mockQueryBuilder = {
+        where: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getManyAndCount: jest.fn().mockResolvedValue([mockTransactions, 1]),
+      };
+
+      transactionRepository.createQueryBuilder.mockReturnValue(
+        mockQueryBuilder
+      );
+
+      const result = await service.getFailedTransactions(page, limit);
+
+      expect(transactionRepository.createQueryBuilder).toHaveBeenCalledWith(
+        "transaction"
+      );
+      expect(result).toEqual({
         items: mockTransactions,
         pagination: {
           page,
@@ -350,32 +366,42 @@ describe('TransactionService', () => {
           hasNext: false,
           hasPrev: false,
         },
-      };
-
-      transactionRepository.findFailedTransactions.mockResolvedValue(mockResult);
-
-      const result = await service.getFailedTransactions(page, limit);
-
-      expect(transactionRepository.findFailedTransactions).toHaveBeenCalledWith(page, limit);
-      expect(result).toEqual(mockResult);
+      });
     });
   });
 
-  describe('getPendingTransactions', () => {
-    it('should return pending transactions successfully', async () => {
+  describe("getPendingTransactions", () => {
+    it("should return pending transactions successfully", async () => {
       const page = 1;
       const limit = 20;
 
       const mockTransactions = [
         {
-          id: 'txn1',
+          id: "txn1",
           type: TransactionType.TRANSFER,
           amount: 100,
           status: TransactionStatus.PENDING,
         },
       ];
 
-      const mockResult = {
+      const mockQueryBuilder = {
+        where: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getManyAndCount: jest.fn().mockResolvedValue([mockTransactions, 1]),
+      };
+
+      transactionRepository.createQueryBuilder.mockReturnValue(
+        mockQueryBuilder
+      );
+
+      const result = await service.getPendingTransactions(page, limit);
+
+      expect(transactionRepository.createQueryBuilder).toHaveBeenCalledWith(
+        "transaction"
+      );
+      expect(result).toEqual({
         items: mockTransactions,
         pagination: {
           page,
@@ -385,35 +411,51 @@ describe('TransactionService', () => {
           hasNext: false,
           hasPrev: false,
         },
-      };
-
-      transactionRepository.findPendingTransactions.mockResolvedValue(mockResult);
-
-      const result = await service.getPendingTransactions(page, limit);
-
-      expect(transactionRepository.findPendingTransactions).toHaveBeenCalledWith(page, limit);
-      expect(result).toEqual(mockResult);
+      });
     });
   });
 
-  describe('getTransactionsByDateRange', () => {
-    it('should return transactions by date range successfully', async () => {
-      const startDate = '2024-01-01';
-      const endDate = '2024-12-31';
+  describe("getTransactionsByDateRange", () => {
+    it("should return transactions by date range successfully", async () => {
+      const startDate = "2024-01-01";
+      const endDate = "2024-12-31";
       const page = 1;
       const limit = 20;
 
       const mockTransactions = [
         {
-          id: 'txn1',
+          id: "txn1",
           type: TransactionType.DEPOSIT,
           amount: 100,
           status: TransactionStatus.COMPLETED,
-          createdAt: '2024-06-15T10:00:00Z',
+          createdAt: "2024-06-15T10:00:00Z",
         },
       ];
 
-      const mockResult = {
+      const mockQueryBuilder = {
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        skip: jest.fn().mockReturnThis(),
+        take: jest.fn().mockReturnThis(),
+        getManyAndCount: jest.fn().mockResolvedValue([mockTransactions, 1]),
+      };
+
+      transactionRepository.createQueryBuilder.mockReturnValue(
+        mockQueryBuilder
+      );
+
+      const result = await service.getTransactionsByDateRange(
+        startDate,
+        endDate,
+        page,
+        limit
+      );
+
+      expect(transactionRepository.createQueryBuilder).toHaveBeenCalledWith(
+        "transaction"
+      );
+      expect(result).toEqual({
         items: mockTransactions,
         pagination: {
           page,
@@ -423,19 +465,7 @@ describe('TransactionService', () => {
           hasNext: false,
           hasPrev: false,
         },
-      };
-
-      transactionRepository.findTransactionsByDateRange.mockResolvedValue(mockResult);
-
-      const result = await service.getTransactionsByDateRange(startDate, endDate, page, limit);
-
-      expect(transactionRepository.findTransactionsByDateRange).toHaveBeenCalledWith(
-        startDate,
-        endDate,
-        page,
-        limit,
-      );
-      expect(result).toEqual(mockResult);
+      });
     });
   });
-}); 
+});

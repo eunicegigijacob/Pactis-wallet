@@ -1,12 +1,17 @@
-import { Injectable, Inject } from '@nestjs/common';
-import { InjectQueue } from '@nestjs/bull';
-import { Queue, Job } from 'bull';
+import { Injectable, Inject } from "@nestjs/common";
+import { InjectQueue } from "@nestjs/bull";
+import { Queue, Job, JobStatus } from "bull";
 
 @Injectable()
 export class QueueService {
-  constructor(@InjectQueue('transactions') private transactionsQueue: Queue) {}
+  constructor(@InjectQueue("transactions") private transactionsQueue: Queue) {}
 
-  async addJob<T>(queueName: string, jobType: string, data: T, options?: any): Promise<Job<T>> {
+  async addJob<T>(
+    queueName: string,
+    jobType: string,
+    data: T,
+    options?: any
+  ): Promise<Job<T>> {
     const queue = this.getQueue(queueName);
     return await queue.add(jobType, data, options);
   }
@@ -16,9 +21,9 @@ export class QueueService {
     return await queue.getJob(jobId);
   }
 
-  async getJobs(queueName: string, status?: string): Promise<Job[]> {
+  async getJobs(queueName: string, status?: JobStatus): Promise<Job[]> {
     const queue = this.getQueue(queueName);
-    return await queue.getJobs([status || 'active']);
+    return await queue.getJobs([status || "active"]);
   }
 
   async removeJob(queueName: string, jobId: string): Promise<void> {
@@ -36,10 +41,10 @@ export class QueueService {
 
   private getQueue(queueName: string): Queue {
     switch (queueName) {
-      case 'transactions':
+      case "transactions":
         return this.transactionsQueue;
       default:
         throw new Error(`Unknown queue: ${queueName}`);
     }
   }
-} 
+}

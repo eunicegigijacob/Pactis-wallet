@@ -1,14 +1,23 @@
-import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
-import { InjectQueue } from '@nestjs/bull';
-import { Queue } from 'bull';
-import { v4 as uuidv4 } from 'uuid';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  ConflictException,
+} from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Repository, DataSource } from "typeorm";
+import { InjectQueue } from "@nestjs/bull";
+import { Queue } from "bull";
+import { v4 as uuidv4 } from "uuid";
 
-import { Transaction, TransactionType, TransactionStatus } from './entities/transaction.entity';
-import { Wallet } from '../wallet/entities/wallet.entity';
-import { TransferDto } from './dto/transfer.dto';
-import { TransactionHistoryDto } from './dto/transaction-history.dto';
+import {
+  Transaction,
+  TransactionType,
+  TransactionStatus,
+} from "./entities/transaction.entity";
+import { Wallet } from "../wallet/entities/wallet.entity";
+import { TransferDto } from "./dto/transfer.dto";
+import { TransactionHistoryDto } from "./dto/transaction-history.dto";
 
 export interface CreateTransactionData {
   transactionId: string;
@@ -29,7 +38,7 @@ export class TransactionService {
     @InjectRepository(Wallet)
     private readonly walletRepository: Repository<Wallet>,
     private readonly dataSource: DataSource,
-    @InjectQueue('transactions') private transactionsQueue: Queue,
+    @InjectQueue("transactions") private transactionsQueue: Queue
   ) {}
 
   async createTransaction(data: CreateTransactionData): Promise<Transaction> {
@@ -41,12 +50,25 @@ export class TransactionService {
     return await this.transactionRepository.save(transaction);
   }
 
-  async transfer(transferDto: TransferDto): Promise<{ transaction: Transaction; fromWallet: Wallet; toWallet: Wallet }> {
-    const { fromWalletId, toWalletId, amount, description, currency, transactionId } = transferDto;
+  async transfer(
+    transferDto: TransferDto
+  ): Promise<{
+    transaction: Transaction;
+    fromWallet: Wallet;
+    toWallet: Wallet;
+  }> {
+    const {
+      fromWalletId,
+      toWalletId,
+      amount,
+      description,
+      currency,
+      transactionId,
+    } = transferDto;
 
     // Check if wallets are different
     if (fromWalletId === toWalletId) {
-      throw new BadRequestException('Cannot transfer to the same wallet');
+      throw new BadRequestException("Cannot transfer to the same wallet");
     }
 
     // Use provided transactionId or generate new one for idempotency
@@ -60,42 +82,48 @@ export class TransactionService {
     if (existingTransaction) {
       if (existingTransaction.isCompleted()) {
         // Return existing successful transaction
-        const fromWallet = await this.walletRepository.findOne({ where: { id: fromWalletId } });
-        const toWallet = await this.walletRepository.findOne({ where: { id: toWalletId } });
+        const fromWallet = await this.walletRepository.findOne({
+          where: { id: fromWalletId },
+        });
+        const toWallet = await this.walletRepository.findOne({
+          where: { id: toWalletId },
+        });
         return { transaction: existingTransaction, fromWallet, toWallet };
       } else if (existingTransaction.isFailed()) {
-        throw new BadRequestException('Previous transfer attempt failed');
+        throw new BadRequestException("Previous transfer attempt failed");
       }
     }
 
     return await this.dataSource.transaction(async (manager) => {
       // Lock both wallets for update
       const fromWallet = await manager
-        .createQueryBuilder(Wallet, 'wallet')
-        .setLock('pessimistic_write')
-        .where('wallet.id = :walletId', { walletId: fromWalletId })
+        .createQueryBuilder(Wallet, "wallet")
+        .setLock("pessimistic_write")
+        .where("wallet.id = :walletId", { walletId: fromWalletId })
         .getOne();
 
       const toWallet = await manager
-        .createQueryBuilder(Wallet, 'wallet')
-        .setLock('pessimistic_write')
-        .where('wallet.id = :walletId', { walletId: toWalletId })
+        .createQueryBuilder(Wallet, "wallet")
+        .setLock("pessimistic_write")
+        .where("wallet.id = :walletId", { walletId: toWalletId })
         .getOne();
 
       if (!fromWallet) {
-        throw new NotFoundException('Source wallet not found');
+        throw new NotFoundException("Source wallet not found");
       }
 
       if (!toWallet) {
-        throw new NotFoundException('Target wallet not found');
+        throw new NotFoundException("Target wallet not found");
       }
 
       if (!fromWallet.canWithdraw(amount)) {
-        throw new BadRequestException('Insufficient funds or invalid source wallet status');
+        throw new BadRequestException(
+          "Insufficient funds or invalid source wallet status"
+        );
       }
 
       if (!toWallet.canDeposit(amount)) {
-        throw new BadRequestException('Invalid target wallet status');
+        throw new BadRequestException("Invalid target wallet status");
       }
 
       // Create or update transaction record
@@ -137,31 +165,43 @@ export class TransactionService {
     limit: number;
     totalPages: number;
   }> {
-    const { walletId, page = 1, limit = 20, type, status, startDate, endDate } = query;
+    const {
+      walletId,
+      page = 1,
+      limit = 20,
+      type,
+      status,
+      startDate,
+      endDate,
+    } = query;
     const skip = (page - 1) * limit;
 
     const queryBuilder = this.transactionRepository
-      .createQueryBuilder('transaction')
-      .where('transaction.walletId = :walletId', { walletId })
-      .orWhere('transaction.targetWalletId = :walletId', { walletId })
-      .orderBy('transaction.createdAt', 'DESC')
+      .createQueryBuilder("transaction")
+      .where("transaction.walletId = :walletId", { walletId })
+      .orWhere("transaction.targetWalletId = :walletId", { walletId })
+      .orderBy("transaction.createdAt", "DESC")
       .skip(skip)
       .take(limit);
 
     if (type) {
-      queryBuilder.andWhere('transaction.type = :type', { type });
+      queryBuilder.andWhere("transaction.type = :type", { type });
     }
 
     if (status) {
-      queryBuilder.andWhere('transaction.status = :status', { status });
+      queryBuilder.andWhere("transaction.status = :status", { status });
     }
 
     if (startDate) {
-      queryBuilder.andWhere('transaction.createdAt >= :startDate', { startDate: new Date(startDate) });
+      queryBuilder.andWhere("transaction.createdAt >= :startDate", {
+        startDate: new Date(startDate),
+      });
     }
 
     if (endDate) {
-      queryBuilder.andWhere('transaction.createdAt <= :endDate', { endDate: new Date(endDate) });
+      queryBuilder.andWhere("transaction.createdAt <= :endDate", {
+        endDate: new Date(endDate),
+      });
     }
 
     const [transactions, total] = await queryBuilder.getManyAndCount();
@@ -178,11 +218,11 @@ export class TransactionService {
   async getTransaction(transactionId: string): Promise<Transaction> {
     const transaction = await this.transactionRepository.findOne({
       where: { transactionId },
-      relations: ['wallet', 'targetWallet'],
+      relations: ["wallet", "targetWallet"],
     });
 
     if (!transaction) {
-      throw new NotFoundException('Transaction not found');
+      throw new NotFoundException("Transaction not found");
     }
 
     return transaction;
@@ -190,10 +230,10 @@ export class TransactionService {
 
   async processTransferAsync(transferDto: TransferDto): Promise<void> {
     // Add transfer to queue for async processing
-    await this.transactionsQueue.add('transfer', transferDto, {
+    await this.transactionsQueue.add("transfer", transferDto, {
       attempts: 3,
       backoff: {
-        type: 'exponential',
+        type: "exponential",
         delay: 2000,
       },
       removeOnComplete: 100,
@@ -208,15 +248,17 @@ export class TransactionService {
     totalFees: number;
   }> {
     const stats = await this.transactionRepository
-      .createQueryBuilder('transaction')
+      .createQueryBuilder("transaction")
       .select([
-        'SUM(CASE WHEN transaction.type = :depositType THEN transaction.amount ELSE 0 END) as totalDeposits',
-        'SUM(CASE WHEN transaction.type = :withdrawalType THEN transaction.amount ELSE 0 END) as totalWithdrawals',
-        'SUM(CASE WHEN transaction.type = :transferType THEN transaction.amount ELSE 0 END) as totalTransfers',
-        'SUM(COALESCE(transaction.fee, 0)) as totalFees',
+        "SUM(CASE WHEN transaction.type = :depositType THEN transaction.amount ELSE 0 END) as totalDeposits",
+        "SUM(CASE WHEN transaction.type = :withdrawalType THEN transaction.amount ELSE 0 END) as totalWithdrawals",
+        "SUM(CASE WHEN transaction.type = :transferType THEN transaction.amount ELSE 0 END) as totalTransfers",
+        "SUM(COALESCE(transaction.fee, 0)) as totalFees",
       ])
-      .where('transaction.walletId = :walletId', { walletId })
-      .andWhere('transaction.status = :status', { status: TransactionStatus.COMPLETED })
+      .where("transaction.walletId = :walletId", { walletId })
+      .andWhere("transaction.status = :status", {
+        status: TransactionStatus.COMPLETED,
+      })
       .setParameters({
         depositType: TransactionType.DEPOSIT,
         withdrawalType: TransactionType.WITHDRAWAL,
@@ -231,4 +273,132 @@ export class TransactionService {
       totalFees: parseFloat(stats.totalFees) || 0,
     };
   }
-} 
+
+  async getFailedTransactions(
+    page: number = 1,
+    limit: number = 20
+  ): Promise<{
+    items: Transaction[];
+    pagination: {
+      page: number;
+      limit: number;
+      total: number;
+      totalPages: number;
+      hasNext: boolean;
+      hasPrev: boolean;
+    };
+  }> {
+    const skip = (page - 1) * limit;
+
+    const queryBuilder = this.transactionRepository
+      .createQueryBuilder("transaction")
+      .where("transaction.status = :status", {
+        status: TransactionStatus.FAILED,
+      })
+      .orderBy("transaction.createdAt", "DESC")
+      .skip(skip)
+      .take(limit);
+
+    const [items, total] = await queryBuilder.getManyAndCount();
+    const totalPages = Math.ceil(total / limit);
+
+    return {
+      items,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+      },
+    };
+  }
+
+  async getPendingTransactions(
+    page: number = 1,
+    limit: number = 20
+  ): Promise<{
+    items: Transaction[];
+    pagination: {
+      page: number;
+      limit: number;
+      total: number;
+      totalPages: number;
+      hasNext: boolean;
+      hasPrev: boolean;
+    };
+  }> {
+    const skip = (page - 1) * limit;
+
+    const queryBuilder = this.transactionRepository
+      .createQueryBuilder("transaction")
+      .where("transaction.status = :status", {
+        status: TransactionStatus.PENDING,
+      })
+      .orderBy("transaction.createdAt", "ASC")
+      .skip(skip)
+      .take(limit);
+
+    const [items, total] = await queryBuilder.getManyAndCount();
+    const totalPages = Math.ceil(total / limit);
+
+    return {
+      items,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+      },
+    };
+  }
+
+  async getTransactionsByDateRange(
+    startDate: string,
+    endDate: string,
+    page: number = 1,
+    limit: number = 20
+  ): Promise<{
+    items: Transaction[];
+    pagination: {
+      page: number;
+      limit: number;
+      total: number;
+      totalPages: number;
+      hasNext: boolean;
+      hasPrev: boolean;
+    };
+  }> {
+    const skip = (page - 1) * limit;
+
+    const queryBuilder = this.transactionRepository
+      .createQueryBuilder("transaction")
+      .where("transaction.createdAt >= :startDate", {
+        startDate: new Date(startDate),
+      })
+      .andWhere("transaction.createdAt <= :endDate", {
+        endDate: new Date(endDate),
+      })
+      .orderBy("transaction.createdAt", "DESC")
+      .skip(skip)
+      .take(limit);
+
+    const [items, total] = await queryBuilder.getManyAndCount();
+    const totalPages = Math.ceil(total / limit);
+
+    return {
+      items,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNext: page < totalPages,
+        hasPrev: page > 1,
+      },
+    };
+  }
+}

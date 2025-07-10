@@ -1,4 +1,9 @@
-import { Repository, SelectQueryBuilder, FindManyOptions } from 'typeorm';
+import {
+  Repository,
+  SelectQueryBuilder,
+  FindManyOptions,
+  DeepPartial,
+} from "typeorm";
 
 export interface PaginationOptions {
   page: number;
@@ -32,13 +37,14 @@ export abstract class BaseRepository<T> {
     return await this.repository.find(options);
   }
 
-  async create(data: Partial<T>): Promise<T> {
+  async create(data: DeepPartial<T>): Promise<T> {
     const entity = this.repository.create(data);
-    return await this.repository.save(entity);
+    const savedEntity = await this.repository.save(entity);
+    return Array.isArray(savedEntity) ? savedEntity[0] : savedEntity;
   }
 
-  async update(id: string, data: Partial<T>): Promise<T | null> {
-    await this.repository.update(id, data);
+  async update(id: string, data: DeepPartial<T>): Promise<T | null> {
+    await this.repository.update(id, data as any);
     return await this.findOneById(id);
   }
 
@@ -58,7 +64,7 @@ export abstract class BaseRepository<T> {
 
   protected async paginateQuery(
     queryBuilder: SelectQueryBuilder<T>,
-    options: PaginationOptions,
+    options: PaginationOptions
   ): Promise<PaginationResult<T>> {
     const { page, limit } = options;
     const skip = (page - 1) * limit;
@@ -88,4 +94,4 @@ export abstract class BaseRepository<T> {
   protected createQueryBuilder(alias: string): SelectQueryBuilder<T> {
     return this.repository.createQueryBuilder(alias);
   }
-} 
+}
