@@ -7,35 +7,35 @@ import {
   VersionColumn,
   OneToMany,
   Index,
-} from 'typeorm';
-import { Transaction } from '../../transaction/entities/transaction.entity';
+} from "typeorm";
+import { Transaction } from "../../transaction/entities/transaction.entity";
 
 export enum WalletStatus {
-  ACTIVE = 'active',
-  SUSPENDED = 'suspended',
-  CLOSED = 'closed',
+  ACTIVE = "active",
+  SUSPENDED = "suspended",
+  CLOSED = "closed",
 }
 
-@Entity('wallets')
-@Index(['userId'], { unique: true })
+@Entity("wallets")
+@Index(["userId"], { unique: true })
 export class Wallet {
-  @PrimaryGeneratedColumn('uuid')
+  @PrimaryGeneratedColumn("uuid")
   id: string;
 
-  @Column({ type: 'varchar', length: 255, unique: true })
+  @Column({ type: "varchar", length: 255 })
   userId: string;
 
-  @Column({ type: 'decimal', precision: 15, scale: 2, default: 0 })
+  @Column({ type: "decimal", precision: 15, scale: 2, default: 0 })
   balance: number;
 
   @Column({
-    type: 'enum',
+    type: "enum",
     enum: WalletStatus,
     default: WalletStatus.ACTIVE,
   })
   status: WalletStatus;
 
-  @Column({ type: 'varchar', length: 255, nullable: true })
+  @Column({ type: "varchar", length: 255, nullable: true })
   currency: string;
 
   @CreateDateColumn()
@@ -67,4 +67,4 @@ export class Wallet {
   subtractBalance(amount: number): void {
     this.balance -= amount;
   }
-} 
+}

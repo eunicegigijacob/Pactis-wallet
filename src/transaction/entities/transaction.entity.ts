@@ -7,68 +7,68 @@ import {
   ManyToOne,
   JoinColumn,
   Index,
-} from 'typeorm';
-import { Wallet } from '../../wallet/entities/wallet.entity';
+} from "typeorm";
+import { Wallet } from "../../wallet/entities/wallet.entity";
 
 export enum TransactionType {
-  DEPOSIT = 'deposit',
-  WITHDRAWAL = 'withdrawal',
-  TRANSFER = 'transfer',
+  DEPOSIT = "deposit",
+  WITHDRAWAL = "withdrawal",
+  TRANSFER = "transfer",
 }
 
 export enum TransactionStatus {
-  PENDING = 'pending',
-  COMPLETED = 'completed',
-  FAILED = 'failed',
-  CANCELLED = 'cancelled',
+  PENDING = "pending",
+  COMPLETED = "completed",
+  FAILED = "failed",
+  CANCELLED = "cancelled",
 }
 
-@Entity('transactions')
-@Index(['transactionId'], { unique: true })
-@Index(['walletId', 'createdAt'])
-@Index(['type', 'status'])
+@Entity("transactions")
+@Index(["transactionId"], { unique: true })
+@Index(["walletId", "createdAt"])
+@Index(["type", "status"])
 export class Transaction {
-  @PrimaryGeneratedColumn('uuid')
+  @PrimaryGeneratedColumn("uuid")
   id: string;
 
-  @Column({ type: 'varchar', length: 255, unique: true })
+  @Column({ type: "varchar", length: 255 })
   transactionId: string;
 
-  @Column({ type: 'uuid' })
+  @Column({ type: "uuid" })
   walletId: string;
 
-  @Column({ type: 'uuid', nullable: true })
+  @Column({ type: "uuid", nullable: true })
   targetWalletId: string;
 
   @Column({
-    type: 'enum',
+    type: "enum",
     enum: TransactionType,
   })
   type: TransactionType;
 
   @Column({
-    type: 'enum',
+    type: "enum",
     enum: TransactionStatus,
     default: TransactionStatus.PENDING,
   })
   status: TransactionStatus;
 
-  @Column({ type: 'decimal', precision: 15, scale: 2 })
+  @Column({ type: "decimal", precision: 15, scale: 2 })
   amount: number;
 
-  @Column({ type: 'decimal', precision: 15, scale: 2, nullable: true })
+  @Column({ type: "decimal", precision: 15, scale: 2, nullable: true })
   fee: number;
 
-  @Column({ type: 'varchar', length: 255, nullable: true })
+  @Column({ type: "varchar", length: 255, nullable: true })
   currency: string;
 
-  @Column({ type: 'text', nullable: true })
+  @Column({ type: "text", nullable: true })
   description: string;
 
-  @Column({ type: 'json', nullable: true })
+  @Column({ type: "json", nullable: true })
   metadata: Record<string, any>;
 
-  @Column({ type: 'text', nullable: true })
+  @Column({ type: "text", nullable: true })
   errorMessage: string;
 
   @CreateDateColumn()
@@ -79,11 +79,11 @@ export class Transaction {
 
   // Relations
   @ManyToOne(() => Wallet, (wallet) => wallet.transactions)
-  @JoinColumn({ name: 'walletId' })
+  @JoinColumn({ name: "walletId" })
   wallet: Wallet;
 
   @ManyToOne(() => Wallet, { nullable: true })
-  @JoinColumn({ name: 'targetWalletId' })
+  @JoinColumn({ name: "targetWalletId" })
   targetWallet: Wallet;
 
   // Methods
@@ -113,4 +113,4 @@ export class Transaction {
   markAsCancelled(): void {
     this.status = TransactionStatus.CANCELLED;
   }
-} 
+}
