@@ -1,8 +1,16 @@
-import { Injectable } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { BaseRepository, PaginationOptions, PaginationResult } from '../../common/repositories/base.repository';
-import { Transaction, TransactionType, TransactionStatus } from '../entities/transaction.entity';
+import { Injectable } from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Repository } from "typeorm";
+import {
+  BaseRepository,
+  PaginationOptions,
+  PaginationResult,
+} from "../../common/repositories/base.repository";
+import {
+  Transaction,
+  TransactionType,
+  TransactionStatus,
+} from "../entities/transaction.entity";
 
 export interface TransactionFilters {
   walletId?: string;
@@ -19,12 +27,14 @@ export interface TransactionFilters {
 export class TransactionRepository extends BaseRepository<Transaction> {
   constructor(
     @InjectRepository(Transaction)
-    private readonly transactionRepo: Repository<Transaction>,
+    private readonly transactionRepo: Repository<Transaction>
   ) {
     super(transactionRepo);
   }
 
-  async findByTransactionId(transactionId: string): Promise<Transaction | null> {
+  async findByTransactionId(
+    transactionId: string
+  ): Promise<Transaction | null> {
     return await this.findOneBy({ transactionId } as any);
   }
 
@@ -40,54 +50,79 @@ export class TransactionRepository extends BaseRepository<Transaction> {
     return await this.findMany({ where: { status } as any });
   }
 
+  async findByUserId(userId: string): Promise<Transaction[]> {
+    const queryBuilder = this.createQueryBuilder("transaction")
+      .leftJoinAndSelect("transaction.wallet", "wallet")
+      .leftJoinAndSelect("transaction.targetWallet", "targetWallet")
+      .where("wallet.userId = :userId", { userId })
+      .orWhere("targetWallet.userId = :userId", { userId })
+      .orderBy("transaction.createdAt", "DESC");
+
+    return await queryBuilder.getMany();
+  }
+
   async findWithRelations(transactionId: string): Promise<Transaction | null> {
     return await this.transactionRepo.findOne({
       where: { transactionId },
-      relations: ['wallet', 'targetWallet'],
+      relations: ["wallet", "targetWallet"],
     });
   }
 
   async findWithFilters(
     filters: TransactionFilters,
-    pagination: PaginationOptions,
+    pagination: PaginationOptions
   ): Promise<PaginationResult<Transaction>> {
-    const queryBuilder = this.createQueryBuilder('transaction')
-      .leftJoinAndSelect('transaction.wallet', 'wallet')
-      .leftJoinAndSelect('transaction.targetWallet', 'targetWallet');
+    const queryBuilder = this.createQueryBuilder("transaction")
+      .leftJoinAndSelect("transaction.wallet", "wallet")
+      .leftJoinAndSelect("transaction.targetWallet", "targetWallet");
 
     if (filters.walletId) {
-      queryBuilder.andWhere('transaction.walletId = :walletId', { walletId: filters.walletId });
+      queryBuilder.andWhere("transaction.walletId = :walletId", {
+        walletId: filters.walletId,
+      });
     }
 
     if (filters.targetWalletId) {
-      queryBuilder.andWhere('transaction.targetWalletId = :targetWalletId', { targetWalletId: filters.targetWalletId });
+      queryBuilder.andWhere("transaction.targetWalletId = :targetWalletId", {
+        targetWalletId: filters.targetWalletId,
+      });
     }
 
     if (filters.type) {
-      queryBuilder.andWhere('transaction.type = :type', { type: filters.type });
+      queryBuilder.andWhere("transaction.type = :type", { type: filters.type });
     }
 
     if (filters.status) {
-      queryBuilder.andWhere('transaction.status = :status', { status: filters.status });
+      queryBuilder.andWhere("transaction.status = :status", {
+        status: filters.status,
+      });
     }
 
     if (filters.startDate) {
-      queryBuilder.andWhere('transaction.createdAt >= :startDate', { startDate: filters.startDate });
+      queryBuilder.andWhere("transaction.createdAt >= :startDate", {
+        startDate: filters.startDate,
+      });
     }
 
     if (filters.endDate) {
-      queryBuilder.andWhere('transaction.createdAt <= :endDate', { endDate: filters.endDate });
+      queryBuilder.andWhere("transaction.createdAt <= :endDate", {
+        endDate: filters.endDate,
+      });
     }
 
     if (filters.minAmount) {
-      queryBuilder.andWhere('transaction.amount >= :minAmount', { minAmount: filters.minAmount });
+      queryBuilder.andWhere("transaction.amount >= :minAmount", {
+        minAmount: filters.minAmount,
+      });
     }
 
     if (filters.maxAmount) {
-      queryBuilder.andWhere('transaction.amount <= :maxAmount', { maxAmount: filters.maxAmount });
+      queryBuilder.andWhere("transaction.amount <= :maxAmount", {
+        maxAmount: filters.maxAmount,
+      });
     }
 
-    queryBuilder.orderBy('transaction.createdAt', 'DESC');
+    queryBuilder.orderBy("transaction.createdAt", "DESC");
 
     return await this.paginateQuery(queryBuilder, pagination);
   }
@@ -101,14 +136,14 @@ export class TransactionRepository extends BaseRepository<Transaction> {
     totalAmount: number;
   }> {
     const queryBuilder = this.transactionRepo
-      .createQueryBuilder('transaction')
+      .createQueryBuilder("transaction")
       .select([
-        'COUNT(*) as totalTransactions',
-        'SUM(CASE WHEN transaction.type = :depositType THEN 1 ELSE 0 END) as totalDeposits',
-        'SUM(CASE WHEN transaction.type = :withdrawalType THEN 1 ELSE 0 END) as totalWithdrawals',
-        'SUM(CASE WHEN transaction.type = :transferType THEN 1 ELSE 0 END) as totalTransfers',
-        'SUM(COALESCE(transaction.fee, 0)) as totalFees',
-        'SUM(transaction.amount) as totalAmount',
+        "COUNT(*) as totalTransactions",
+        "SUM(CASE WHEN transaction.type = :depositType THEN 1 ELSE 0 END) as totalDeposits",
+        "SUM(CASE WHEN transaction.type = :withdrawalType THEN 1 ELSE 0 END) as totalWithdrawals",
+        "SUM(CASE WHEN transaction.type = :transferType THEN 1 ELSE 0 END) as totalTransfers",
+        "SUM(COALESCE(transaction.fee, 0)) as totalFees",
+        "SUM(transaction.amount) as totalAmount",
       ])
       .setParameters({
         depositType: TransactionType.DEPOSIT,
@@ -117,7 +152,7 @@ export class TransactionRepository extends BaseRepository<Transaction> {
       });
 
     if (walletId) {
-      queryBuilder.where('transaction.walletId = :walletId', { walletId });
+      queryBuilder.where("transaction.walletId = :walletId", { walletId });
     }
 
     const stats = await queryBuilder.getRawOne();
@@ -136,19 +171,48 @@ export class TransactionRepository extends BaseRepository<Transaction> {
     startDate: Date,
     endDate: Date,
     pagination: PaginationOptions,
+    userId?: string
   ): Promise<PaginationResult<Transaction>> {
-    const queryBuilder = this.createQueryBuilder('transaction')
-      .where('transaction.createdAt >= :startDate', { startDate })
-      .andWhere('transaction.createdAt <= :endDate', { endDate })
-      .orderBy('transaction.createdAt', 'DESC');
+    const queryBuilder = this.createQueryBuilder("transaction")
+      .leftJoinAndSelect("transaction.wallet", "wallet")
+      .leftJoinAndSelect("transaction.targetWallet", "targetWallet")
+      .where("transaction.createdAt >= :startDate", { startDate })
+      .andWhere("transaction.createdAt <= :endDate", { endDate });
+
+    if (userId) {
+      queryBuilder.andWhere(
+        "(wallet.userId = :userId OR targetWallet.userId = :userId)",
+        { userId }
+      );
+    }
+
+    queryBuilder.orderBy("transaction.createdAt", "DESC");
 
     return await this.paginateQuery(queryBuilder, pagination);
   }
 
-  async findFailedTransactions(pagination: PaginationOptions): Promise<PaginationResult<Transaction>> {
-    const queryBuilder = this.createQueryBuilder('transaction')
-      .where('transaction.status = :status', { status: TransactionStatus.FAILED })
-      .orderBy('transaction.createdAt', 'DESC');
+  async findTransactionsByUserId(
+    userId: string,
+    pagination: PaginationOptions
+  ): Promise<PaginationResult<Transaction>> {
+    const queryBuilder = this.createQueryBuilder("transaction")
+      .leftJoinAndSelect("transaction.wallet", "wallet")
+      .leftJoinAndSelect("transaction.targetWallet", "targetWallet")
+      .where("wallet.userId = :userId", { userId })
+      .orWhere("targetWallet.userId = :userId", { userId })
+      .orderBy("transaction.createdAt", "DESC");
+
+    return await this.paginateQuery(queryBuilder, pagination);
+  }
+
+  async findFailedTransactions(
+    pagination: PaginationOptions
+  ): Promise<PaginationResult<Transaction>> {
+    const queryBuilder = this.createQueryBuilder("transaction")
+      .where("transaction.status = :status", {
+        status: TransactionStatus.FAILED,
+      })
+      .orderBy("transaction.createdAt", "DESC");
 
     return await this.paginateQuery(queryBuilder, pagination);
   }
@@ -156,7 +220,7 @@ export class TransactionRepository extends BaseRepository<Transaction> {
   async updateTransactionStatus(
     transactionId: string,
     status: TransactionStatus,
-    errorMessage?: string,
+    errorMessage?: string
   ): Promise<Transaction | null> {
     const updateData: any = { status };
     if (errorMessage) {
@@ -165,11 +229,15 @@ export class TransactionRepository extends BaseRepository<Transaction> {
     return await this.update(transactionId, updateData);
   }
 
-  async findPendingTransactions(pagination: PaginationOptions): Promise<PaginationResult<Transaction>> {
-    const queryBuilder = this.createQueryBuilder('transaction')
-      .where('transaction.status = :status', { status: TransactionStatus.PENDING })
-      .orderBy('transaction.createdAt', 'ASC');
+  async findPendingTransactions(
+    pagination: PaginationOptions
+  ): Promise<PaginationResult<Transaction>> {
+    const queryBuilder = this.createQueryBuilder("transaction")
+      .where("transaction.status = :status", {
+        status: TransactionStatus.PENDING,
+      })
+      .orderBy("transaction.createdAt", "ASC");
 
     return await this.paginateQuery(queryBuilder, pagination);
   }
-} 
+}

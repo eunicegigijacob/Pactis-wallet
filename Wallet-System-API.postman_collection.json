@@ -495,7 +495,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{baseUrl}}/transactions/get-transactions-by-date-range?startDate=2024-01-01&endDate=2024-12-31&page=1&limit=20",
+              "raw": "{{baseUrl}}/transactions/get-transactions-by-date-range?startDate=2024-01-01&endDate=2024-12-31&userId=test-user&page=1&limit=20",
               "host": ["{{baseUrl}}"],
               "path": ["transactions", "get-transactions-by-date-range"],
               "query": [
@@ -510,6 +510,11 @@
                   "description": "End date (YYYY-MM-DD)"
                 },
                 {
+                  "key": "userId",
+                  "value": "test-user",
+                  "description": "User ID to filter transactions (optional)"
+                },
+                {
                   "key": "page",
                   "value": "1",
                   "description": "Page number for pagination"
@@ -521,7 +526,56 @@
                 }
               ]
             },
-            "description": "Get transactions within a specific date range"
+            "description": "Get transactions within a specific date range, optionally filtered by user ID"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Transactions by User ID",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/transactions/get-transactions-by-user/test-user?page=1&limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["transactions", "get-transactions-by-user", "test-user"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "description": "Page number for pagination"
+                },
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Number of items per page"
+                }
+              ]
+            },
+            "description": "Get all transactions for a specific user ID"
+          },
+          "response": []
+        },
+        {
+          "name": "Create Test Transactions",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"userId\": \"test-user\",\n  \"count\": 5\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/transactions/create-test-transactions",
+              "host": ["{{baseUrl}}"],
+              "path": ["transactions", "create-test-transactions"]
+            },
+            "description": "Create test transactions for testing purposes"
           },
           "response": []
         }

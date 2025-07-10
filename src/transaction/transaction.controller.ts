@@ -19,7 +19,11 @@ import {
 
 import { TransactionService } from "./transaction.service";
 import { TransferDto } from "./dto/transfer.dto";
-import { TransactionHistoryDto } from "./dto/transaction-history.dto";
+import {
+  TransactionHistoryDto,
+  TransactionsByUserIdDto,
+  TransactionsByDateRangeDto,
+} from "./dto/transaction-history.dto";
 import { Transaction } from "./entities/transaction.entity";
 import { ApiResponse as ApiResponseInterface } from "../common/interfaces/api-response.interface";
 
@@ -282,6 +286,11 @@ export class TransactionController {
     description: "End date (ISO format)",
     required: true,
   })
+  @ApiQuery({
+    name: "userId",
+    description: "User ID to filter transactions",
+    required: false,
+  })
   @ApiQuery({ name: "page", description: "Page number", required: false })
   @ApiQuery({ name: "limit", description: "Items per page", required: false })
   @ApiResponse({
@@ -291,17 +300,82 @@ export class TransactionController {
   async getTransactionsByDateRange(
     @Request() req: any
   ): Promise<ApiResponseInterface<any>> {
-    const { startDate, endDate, page = 1, limit = 20 } = req.query;
+    const { startDate, endDate, userId, page = 1, limit = 20 } = req.query;
 
     if (!startDate || !endDate) {
       throw new BadGatewayException("Please provide start date and end date");
     }
 
-    return await this.transactionService.getTransactionsByDateRange(
+    const dto: TransactionsByDateRangeDto = {
       startDate,
       endDate,
-      parseInt(page),
-      parseInt(limit)
+      userId,
+      page: parseInt(page),
+      limit: parseInt(limit),
+    };
+
+    return await this.transactionService.getTransactionsByDateRange(
+      dto.startDate,
+      dto.endDate,
+      dto.page,
+      dto.limit,
+      dto.userId
     );
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Get("get-transactions-by-user/:userId")
+  @ApiOperation({ summary: "Get transactions by user ID" })
+  @ApiParam({ name: "userId", description: "User ID" })
+  @ApiQuery({ name: "page", description: "Page number", required: false })
+  @ApiQuery({ name: "limit", description: "Items per page", required: false })
+  @ApiResponse({
+    status: 200,
+    description: "Transactions retrieved successfully",
+  })
+  async getTransactionsByUserId(
+    @Request() req: any
+  ): Promise<ApiResponseInterface<any>> {
+    const { userId } = req.params;
+    const { page = 1, limit = 20 } = req.query;
+
+    if (!userId) {
+      throw new BadGatewayException("Please provide user ID");
+    }
+
+    const dto: TransactionsByUserIdDto = {
+      userId,
+      page: parseInt(page),
+      limit: parseInt(limit),
+    };
+
+    return await this.transactionService.getTransactionsByUserId(
+      dto.userId,
+      dto.page,
+      dto.limit
+    );
+  }
+
+  @HttpCode(HttpStatus.OK)
+  @Post("create-test-transactions")
+  @ApiOperation({ summary: "Create test transactions for testing purposes" })
+  @ApiResponse({
+    status: 200,
+    description: "Test transactions created successfully",
+  })
+  async createTestTransactions(
+    @Request() req: any
+  ): Promise<ApiResponseInterface<any>> {
+    const { userId = "test-user", count = 5 } = req.body;
+
+    // Create test transactions for the specified user
+    const testTransactions =
+      await this.transactionService.createTestTransactions(userId, count);
+
+    return {
+      status: true,
+      message: "Test transactions created successfully",
+      data: { transactions: testTransactions },
+    };
   }
 }
