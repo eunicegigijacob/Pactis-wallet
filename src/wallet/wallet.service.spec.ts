@@ -92,8 +92,6 @@ describe("WalletService", () => {
             create: jest.fn(),
             updateStatus: jest.fn(),
             findWithFilters: jest.fn(),
-            getWalletStats: jest.fn(),
-            findWalletsByBalanceRange: jest.fn(),
           },
         },
         { provide: DataSource, useValue: dataSource },

@@ -7,7 +7,6 @@ import { APP_GUARD } from "@nestjs/core";
 
 import { WalletModule } from "./wallet/wallet.module";
 import { TransactionModule } from "./transaction/transaction.module";
-import { QueueModule } from "./queue/queue.module";
 import { CustomCacheModule } from "./cache/cache.module";
 import { HealthModule } from "./health/health.module";
 import { AuthModule } from "./auth/auth.module";
@@ -42,7 +41,6 @@ import { RedisConfig } from "./config/redis.config";
     AuthModule,
     WalletModule,
     TransactionModule,
-    QueueModule,
     CustomCacheModule,
     HealthModule,
   ],

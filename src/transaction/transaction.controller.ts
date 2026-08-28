@@ -8,7 +8,6 @@ import {
   Param,
   Query,
   BadRequestException,
-  ForbiddenException,
 } from "@nestjs/common";
 import {
   ApiTags,
@@ -306,32 +305,5 @@ export class TransactionController {
       parseInt(page, 10),
       parseInt(limit, 10)
     );
-  }
-
-  @HttpCode(HttpStatus.OK)
-  @Post("create-test-transactions")
-  @ApiOperation({
-    summary: "Create test transactions (disabled when NODE_ENV=production)",
-  })
-  @ApiResponse({
-    status: 200,
-    description: "Test transactions created successfully",
-  })
-  @ApiResponse({ status: 403, description: "Disabled in production" })
-  async createTestTransactions(
-    @CurrentUser() user: AuthenticatedUser
-  ): Promise<ApiResponseInterface<any>> {
-    if (process.env.NODE_ENV === "production") {
-      throw new ForbiddenException("Test endpoints are disabled in production");
-    }
-
-    const testTransactions =
-      await this.transactionService.createTestTransactions(user.userId, 5);
-
-    return {
-      status: true,
-      message: "Test transactions created successfully",
-      data: { transactions: testTransactions },
-    };
   }
 }

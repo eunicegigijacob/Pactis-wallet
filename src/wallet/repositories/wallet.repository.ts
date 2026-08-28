@@ -27,21 +27,6 @@ export class WalletRepository extends BaseRepository<Wallet> {
     return await this.findOneBy({ userId } as any);
   }
 
-  async findByStatus(status: WalletStatus): Promise<Wallet[]> {
-    return await this.findMany({ where: { status } as any });
-  }
-
-  async findByCurrency(currency: string): Promise<Wallet[]> {
-    return await this.findMany({ where: { currency } as any });
-  }
-
-  async findWithTransactions(userId: string): Promise<Wallet | null> {
-    return await this.walletRepo.findOne({
-      where: { userId },
-      relations: ["transactions"],
-    });
-  }
-
   async findWithFilters(
     filters: WalletFilters,
     pagination: PaginationOptions
@@ -71,57 +56,10 @@ export class WalletRepository extends BaseRepository<Wallet> {
     return await this.paginateQuery(queryBuilder, pagination);
   }
 
-  async updateBalance(
-    walletId: string,
-    newBalance: number
-  ): Promise<Wallet | null> {
-    return await this.update(walletId, { balance: newBalance } as any);
-  }
-
   async updateStatus(
     walletId: string,
     status: WalletStatus
   ): Promise<Wallet | null> {
     return await this.update(walletId, { status } as any);
-  }
-
-  async getWalletStats(): Promise<{
-    totalWallets: number;
-    activeWallets: number;
-    totalBalance: number;
-    averageBalance: number;
-  }> {
-    const totalWallets = await this.count();
-    const activeWallets = await this.count({
-      status: WalletStatus.ACTIVE,
-    } as any);
-
-    const balanceStats = await this.walletRepo
-      .createQueryBuilder("wallet")
-      .select([
-        "SUM(wallet.balance) as totalBalance",
-        "AVG(wallet.balance) as averageBalance",
-      ])
-      .getRawOne();
-
-    return {
-      totalWallets,
-      activeWallets,
-      totalBalance: parseFloat(balanceStats.totalBalance) || 0,
-      averageBalance: parseFloat(balanceStats.averageBalance) || 0,
-    };
-  }
-
-  async findWalletsByBalanceRange(
-    minBalance: number,
-    maxBalance: number,
-    pagination: PaginationOptions
-  ): Promise<PaginationResult<Wallet>> {
-    const queryBuilder = this.createQueryBuilder("wallet")
-      .where("wallet.balance >= :minBalance", { minBalance })
-      .andWhere("wallet.balance <= :maxBalance", { maxBalance })
-      .orderBy("wallet.balance", "DESC");
-
-    return await this.paginateQuery(queryBuilder, pagination);
   }
 }

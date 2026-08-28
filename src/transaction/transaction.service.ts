@@ -18,7 +18,7 @@ import {
   TransactionType,
   TransactionStatus,
 } from "./entities/transaction.entity";
-import { Wallet, WalletStatus } from "../wallet/entities/wallet.entity";
+import { Wallet } from "../wallet/entities/wallet.entity";
 import { TransferDto } from "./dto/transfer.dto";
 import { TransactionHistoryDto } from "./dto/transaction-history.dto";
 import { ApiResponse } from "../common/interfaces/api-response.interface";
@@ -738,59 +738,5 @@ export class TransactionService {
       message: "Transactions retrieved successfully",
       data: result,
     };
-  }
-
-  async createTestTransactions(
-    userId: string,
-    count: number = 5
-  ): Promise<Transaction[]> {
-    // First, ensure we have a wallet for this user
-    let wallet = await this.walletRepository.findOne({
-      where: { userId },
-    });
-
-    if (!wallet) {
-      // Create a wallet for the user if it doesn't exist
-      wallet = this.walletRepository.create({
-        userId,
-        balance: 1000,
-        currency: "USD",
-        status: WalletStatus.ACTIVE,
-      });
-      await this.walletRepository.save(wallet);
-    }
-
-    const transactions: Transaction[] = [];
-    const types = [
-      TransactionType.DEPOSIT,
-      TransactionType.WITHDRAWAL,
-      TransactionType.TRANSFER,
-    ];
-    const statuses = [
-      TransactionStatus.COMPLETED,
-      TransactionStatus.PENDING,
-      TransactionStatus.FAILED,
-    ];
-
-    for (let i = 0; i < count; i++) {
-      const transaction = this.transactionRepository.create({
-        transactionId: `test-tx-${userId}-${Date.now()}-${i}`,
-        walletId: wallet.id,
-        type: types[i % types.length],
-        status: statuses[i % statuses.length],
-        amount: Math.floor(Math.random() * 1000) + 10,
-        description: `Test transaction ${i + 1} for user ${userId}`,
-        currency: "USD",
-        createdAt: new Date(
-          Date.now() - Math.random() * 30 * 24 * 60 * 60 * 1000
-        ), // Random date within last 30 days
-      });
-
-      const savedTransaction =
-        await this.transactionRepository.save(transaction);
-      transactions.push(savedTransaction);
-    }
-
-    return transactions;
   }
 }

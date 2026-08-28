@@ -102,7 +102,7 @@ E2E tests **fail** if MySQL or Redis is not reachable.
 
 ## API
 
-Global prefix `/api/v1`. Swagger UI: http://localhost:3000/api/v1 (Authorize with the login token).
+Global prefix `/api/v1`. Swagger UI at http://localhost:3000/api/v1 is the full route catalog (Authorize with the login token). Core routes:
 
 ### Auth (public)
 

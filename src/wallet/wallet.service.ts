@@ -460,34 +460,6 @@ export class WalletService {
     };
   }
 
-  async getWalletStats(): Promise<ApiResponse<any>> {
-    const stats = await this.walletRepo.getWalletStats();
-
-    return {
-      status: true,
-      message: "Wallet statistics retrieved successfully",
-      data: stats,
-    };
-  }
-
-  async getWallets(
-    page: number = 1,
-    limit: number = 20,
-    status?: WalletStatus,
-    currency?: string
-  ): Promise<ApiResponse<any>> {
-    const filters = { status, currency };
-    const pagination = { page, limit };
-
-    const result = await this.walletRepo.findWithFilters(filters, pagination);
-
-    return {
-      status: true,
-      message: "Wallets retrieved successfully",
-      data: result,
-    };
-  }
-
   async getWalletsForUser(
     userId: string,
     page: number = 1,
@@ -498,27 +470,6 @@ export class WalletService {
     const result = await this.walletRepo.findWithFilters(
       { status, currency, userId },
       { page, limit }
-    );
-
-    return {
-      status: true,
-      message: "Wallets retrieved successfully",
-      data: result,
-    };
-  }
-
-  async getWalletsByBalanceRange(
-    minBalance: number,
-    maxBalance: number,
-    page: number = 1,
-    limit: number = 20
-  ): Promise<ApiResponse<any>> {
-    const pagination = { page, limit };
-
-    const result = await this.walletRepo.findWalletsByBalanceRange(
-      minBalance,
-      maxBalance,
-      pagination
     );
 
     return {
