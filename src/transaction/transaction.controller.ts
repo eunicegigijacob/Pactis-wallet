@@ -1,13 +1,14 @@
 import {
   Body,
-  Request,
   Controller,
   Get,
   HttpCode,
   HttpStatus,
   Post,
-  UseGuards,
-  BadGatewayException,
+  Param,
+  Query,
+  BadRequestException,
+  ForbiddenException,
 } from "@nestjs/common";
 import {
   ApiTags,
@@ -15,36 +16,49 @@ import {
   ApiResponse,
   ApiParam,
   ApiQuery,
+  ApiBearerAuth,
 } from "@nestjs/swagger";
+import { Throttle } from "@nestjs/throttler";
 
 import { TransactionService } from "./transaction.service";
+import { WalletAccessService } from "../auth/wallet-access.service";
+import { CurrentUser } from "../auth/decorators/current-user.decorator";
+import { AuthenticatedUser } from "../auth/interfaces/authenticated-user.interface";
 import { TransferDto } from "./dto/transfer.dto";
-import {
-  TransactionHistoryDto,
-  TransactionsByUserIdDto,
-  TransactionsByDateRangeDto,
-} from "./dto/transaction-history.dto";
+import { TransactionHistoryDto } from "./dto/transaction-history.dto";
 import { Transaction } from "./entities/transaction.entity";
 import { ApiResponse as ApiResponseInterface } from "../common/interfaces/api-response.interface";
 
 @ApiTags("Transactions")
+@ApiBearerAuth("access-token")
 @Controller("transactions")
 export class TransactionController {
-  constructor(private readonly transactionService: TransactionService) {}
+  constructor(
+    private readonly transactionService: TransactionService,
+    private readonly walletAccess: WalletAccessService
+  ) {}
 
   @HttpCode(HttpStatus.OK)
   @Post("transfer")
-  @ApiOperation({ summary: "Transfer funds between wallets" })
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @ApiOperation({ summary: "Transfer funds from a wallet you own" })
   @ApiResponse({ status: 200, description: "Transfer successful" })
   @ApiResponse({ status: 400, description: "Invalid transfer request" })
+  @ApiResponse({ status: 401, description: "Missing or invalid JWT" })
+  @ApiResponse({ status: 403, description: "Source wallet belongs to another user" })
   @ApiResponse({ status: 404, description: "Wallet not found" })
-  async transfer(@Body() dto: TransferDto): Promise<
+  @ApiResponse({ status: 429, description: "Rate limit exceeded" })
+  async transfer(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: TransferDto
+  ): Promise<
     ApiResponseInterface<{
       transaction: Transaction;
       fromWallet: { id: string };
       toWallet: { id: string; balance: number };
     }>
   > {
+    await this.walletAccess.assertOwned(dto.fromWalletId, user.userId);
     const result = await this.transactionService.transfer(dto);
     return {
       status: result.status,
@@ -64,17 +78,22 @@ export class TransactionController {
 
   @HttpCode(HttpStatus.ACCEPTED)
   @Post("transfer-async")
-  @ApiOperation({ summary: "Transfer funds asynchronously" })
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @ApiOperation({ summary: "Queue an asynchronous transfer from a wallet you own" })
   @ApiResponse({ status: 202, description: "Transfer queued for processing" })
+  @ApiResponse({ status: 403, description: "Source wallet belongs to another user" })
+  @ApiResponse({ status: 429, description: "Rate limit exceeded" })
   async transferAsync(
+    @CurrentUser() user: AuthenticatedUser,
     @Body() dto: TransferDto
   ): Promise<ApiResponseInterface<{ message: string; transactionId: string }>> {
+    await this.walletAccess.assertOwned(dto.fromWalletId, user.userId);
     return await this.transactionService.processTransferAsync(dto);
   }
 
   @HttpCode(HttpStatus.OK)
   @Get("get-transaction-history")
-  @ApiOperation({ summary: "Get transaction history for a wallet" })
+  @ApiOperation({ summary: "Get transaction history for a wallet you own" })
   @ApiQuery({ name: "walletId", description: "Wallet ID", required: true })
   @ApiQuery({ name: "page", description: "Page number", required: false })
   @ApiQuery({ name: "limit", description: "Items per page", required: false })
@@ -102,7 +121,17 @@ export class TransactionController {
     status: 200,
     description: "Transaction history retrieved successfully",
   })
-  async getTransactionHistory(@Request() req: any): Promise<
+  @ApiResponse({ status: 403, description: "Wallet belongs to another user" })
+  async getTransactionHistory(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("walletId") walletId: string,
+    @Query("page") page = "1",
+    @Query("limit") limit = "20",
+    @Query("type") type?: TransactionHistoryDto["type"],
+    @Query("status") status?: TransactionHistoryDto["status"],
+    @Query("startDate") startDate?: string,
+    @Query("endDate") endDate?: string
+  ): Promise<
     ApiResponseInterface<{
       transactions: Transaction[];
       total: number;
@@ -111,24 +140,16 @@ export class TransactionController {
       totalPages: number;
     }>
   > {
-    const {
-      walletId,
-      page = 1,
-      limit = 20,
-      type,
-      status,
-      startDate,
-      endDate,
-    } = req.query;
-
     if (!walletId) {
-      throw new BadGatewayException("Please provide wallet ID");
+      throw new BadRequestException("Please provide wallet ID");
     }
+
+    await this.walletAccess.assertOwned(walletId, user.userId);
 
     const query: TransactionHistoryDto = {
       walletId,
-      page: parseInt(page),
-      limit: parseInt(limit),
+      page: parseInt(page, 10),
+      limit: parseInt(limit, 10),
       type,
       status,
       startDate,
@@ -140,27 +161,33 @@ export class TransactionController {
 
   @HttpCode(HttpStatus.OK)
   @Get("get-transaction/:transactionId")
-  @ApiOperation({ summary: "Get transaction by ID" })
-  @ApiParam({ name: "transactionId", description: "Transaction ID" })
+  @ApiOperation({ summary: "Get a transaction you participated in" })
+  @ApiParam({ name: "transactionId", description: "Idempotency / transaction ID" })
   @ApiResponse({ status: 200, description: "Transaction found" })
+  @ApiResponse({ status: 403, description: "Transaction belongs to another user" })
   @ApiResponse({ status: 404, description: "Transaction not found" })
   async getTransaction(
-    @Request() req: any
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("transactionId") transactionId: string
   ): Promise<ApiResponseInterface<Transaction>> {
-    return await this.transactionService.getTransaction(
-      req.params.transactionId
-    );
+    const result = await this.transactionService.getTransaction(transactionId);
+    await this.walletAccess.assertTransactionVisible(result.data, user.userId);
+    return result;
   }
 
   @HttpCode(HttpStatus.OK)
   @Get("get-transaction-stats/:walletId")
-  @ApiOperation({ summary: "Get transaction statistics for a wallet" })
+  @ApiOperation({ summary: "Get transaction statistics for a wallet you own" })
   @ApiParam({ name: "walletId", description: "Wallet ID" })
   @ApiResponse({
     status: 200,
     description: "Statistics retrieved successfully",
   })
-  async getTransactionStats(@Request() req: any): Promise<
+  @ApiResponse({ status: 403, description: "Wallet belongs to another user" })
+  async getTransactionStats(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("walletId") walletId: string
+  ): Promise<
     ApiResponseInterface<{
       totalDeposits: number;
       totalWithdrawals: number;
@@ -168,76 +195,13 @@ export class TransactionController {
       totalFees: number;
     }>
   > {
-    return await this.transactionService.getTransactionStats(
-      req.params.walletId
-    );
-  }
-
-  @HttpCode(HttpStatus.OK)
-  @Get("get-transactions-by-filter")
-  @ApiOperation({ summary: "Get transactions by filter" })
-  @ApiQuery({ name: "walletId", description: "Wallet ID", required: false })
-  @ApiQuery({ name: "type", description: "Transaction type", required: false })
-  @ApiQuery({
-    name: "status",
-    description: "Transaction status",
-    required: false,
-  })
-  @ApiQuery({ name: "startDate", description: "Start date", required: false })
-  @ApiQuery({ name: "endDate", description: "End date", required: false })
-  @ApiQuery({
-    name: "minAmount",
-    description: "Minimum amount",
-    required: false,
-  })
-  @ApiQuery({
-    name: "maxAmount",
-    description: "Maximum amount",
-    required: false,
-  })
-  @ApiQuery({ name: "page", description: "Page number", required: false })
-  @ApiQuery({ name: "limit", description: "Items per page", required: false })
-  @ApiResponse({
-    status: 200,
-    description: "Transactions retrieved successfully",
-  })
-  async getTransactionsByFilter(
-    @Request() req: any
-  ): Promise<ApiResponseInterface<any>> {
-    const {
-      walletId,
-      type,
-      status,
-      startDate,
-      endDate,
-      minAmount,
-      maxAmount,
-      page = 1,
-      limit = 20,
-    } = req.query;
-
-    // This would need to be implemented in the service
-    // For now, returning a placeholder response
-    return {
-      status: true,
-      message: "Transactions retrieved successfully",
-      data: {
-        items: [],
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total: 0,
-          totalPages: 0,
-          hasNext: false,
-          hasPrev: false,
-        },
-      },
-    };
+    await this.walletAccess.assertOwned(walletId, user.userId);
+    return await this.transactionService.getTransactionStats(walletId);
   }
 
   @HttpCode(HttpStatus.OK)
   @Get("get-failed-transactions")
-  @ApiOperation({ summary: "Get failed transactions" })
+  @ApiOperation({ summary: "Get failed transactions for wallets you own" })
   @ApiQuery({ name: "page", description: "Page number", required: false })
   @ApiQuery({ name: "limit", description: "Items per page", required: false })
   @ApiResponse({
@@ -245,18 +209,20 @@ export class TransactionController {
     description: "Failed transactions retrieved successfully",
   })
   async getFailedTransactions(
-    @Request() req: any
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("page") page = "1",
+    @Query("limit") limit = "20"
   ): Promise<ApiResponseInterface<any>> {
-    const { page = 1, limit = 20 } = req.query;
     return await this.transactionService.getFailedTransactions(
-      parseInt(page),
-      parseInt(limit)
+      parseInt(page, 10),
+      parseInt(limit, 10),
+      user.userId
     );
   }
 
   @HttpCode(HttpStatus.OK)
   @Get("get-pending-transactions")
-  @ApiOperation({ summary: "Get pending transactions" })
+  @ApiOperation({ summary: "Get pending transactions for wallets you own" })
   @ApiQuery({ name: "page", description: "Page number", required: false })
   @ApiQuery({ name: "limit", description: "Items per page", required: false })
   @ApiResponse({
@@ -264,18 +230,22 @@ export class TransactionController {
     description: "Pending transactions retrieved successfully",
   })
   async getPendingTransactions(
-    @Request() req: any
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("page") page = "1",
+    @Query("limit") limit = "20"
   ): Promise<ApiResponseInterface<any>> {
-    const { page = 1, limit = 20 } = req.query;
     return await this.transactionService.getPendingTransactions(
-      parseInt(page),
-      parseInt(limit)
+      parseInt(page, 10),
+      parseInt(limit, 10),
+      user.userId
     );
   }
 
   @HttpCode(HttpStatus.OK)
   @Get("get-transactions-by-date-range")
-  @ApiOperation({ summary: "Get transactions by date range" })
+  @ApiOperation({
+    summary: "Get the authenticated user's transactions in a date range",
+  })
   @ApiQuery({
     name: "startDate",
     description: "Start date (ISO format)",
@@ -286,11 +256,6 @@ export class TransactionController {
     description: "End date (ISO format)",
     required: true,
   })
-  @ApiQuery({
-    name: "userId",
-    description: "User ID to filter transactions",
-    required: false,
-  })
   @ApiQuery({ name: "page", description: "Page number", required: false })
   @ApiQuery({ name: "limit", description: "Items per page", required: false })
   @ApiResponse({
@@ -298,79 +263,70 @@ export class TransactionController {
     description: "Transactions retrieved successfully",
   })
   async getTransactionsByDateRange(
-    @Request() req: any
+    @CurrentUser() user: AuthenticatedUser,
+    @Query("startDate") startDate: string,
+    @Query("endDate") endDate: string,
+    @Query("page") page = "1",
+    @Query("limit") limit = "20"
   ): Promise<ApiResponseInterface<any>> {
-    const { startDate, endDate, userId, page = 1, limit = 20 } = req.query;
-
     if (!startDate || !endDate) {
-      throw new BadGatewayException("Please provide start date and end date");
+      throw new BadRequestException("Please provide start date and end date");
     }
 
-    const dto: TransactionsByDateRangeDto = {
+    return await this.transactionService.getTransactionsByDateRange(
       startDate,
       endDate,
-      userId,
-      page: parseInt(page),
-      limit: parseInt(limit),
-    };
-
-    return await this.transactionService.getTransactionsByDateRange(
-      dto.startDate,
-      dto.endDate,
-      dto.page,
-      dto.limit,
-      dto.userId
+      parseInt(page, 10),
+      parseInt(limit, 10),
+      user.userId
     );
   }
 
   @HttpCode(HttpStatus.OK)
   @Get("get-transactions-by-user/:userId")
-  @ApiOperation({ summary: "Get transactions by user ID" })
-  @ApiParam({ name: "userId", description: "User ID" })
+  @ApiOperation({ summary: "Get the authenticated user's transactions" })
+  @ApiParam({ name: "userId", description: "Must match the authenticated user" })
   @ApiQuery({ name: "page", description: "Page number", required: false })
   @ApiQuery({ name: "limit", description: "Items per page", required: false })
   @ApiResponse({
     status: 200,
     description: "Transactions retrieved successfully",
   })
+  @ApiResponse({ status: 403, description: "Cannot look up another user's transactions" })
   async getTransactionsByUserId(
-    @Request() req: any
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("userId") userId: string,
+    @Query("page") page = "1",
+    @Query("limit") limit = "20"
   ): Promise<ApiResponseInterface<any>> {
-    const { userId } = req.params;
-    const { page = 1, limit = 20 } = req.query;
-
-    if (!userId) {
-      throw new BadGatewayException("Please provide user ID");
-    }
-
-    const dto: TransactionsByUserIdDto = {
-      userId,
-      page: parseInt(page),
-      limit: parseInt(limit),
-    };
+    this.walletAccess.assertSameUser(userId, user.userId);
 
     return await this.transactionService.getTransactionsByUserId(
-      dto.userId,
-      dto.page,
-      dto.limit
+      userId,
+      parseInt(page, 10),
+      parseInt(limit, 10)
     );
   }
 
   @HttpCode(HttpStatus.OK)
   @Post("create-test-transactions")
-  @ApiOperation({ summary: "Create test transactions for testing purposes" })
+  @ApiOperation({
+    summary: "Create test transactions (disabled when NODE_ENV=production)",
+  })
   @ApiResponse({
     status: 200,
     description: "Test transactions created successfully",
   })
+  @ApiResponse({ status: 403, description: "Disabled in production" })
   async createTestTransactions(
-    @Request() req: any
+    @CurrentUser() user: AuthenticatedUser
   ): Promise<ApiResponseInterface<any>> {
-    const { userId = "test-user", count = 5 } = req.body;
+    if (process.env.NODE_ENV === "production") {
+      throw new ForbiddenException("Test endpoints are disabled in production");
+    }
 
-    // Create test transactions for the specified user
     const testTransactions =
-      await this.transactionService.createTestTransactions(userId, count);
+      await this.transactionService.createTestTransactions(user.userId, 5);
 
     return {
       status: true,

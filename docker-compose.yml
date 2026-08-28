@@ -1,7 +1,4 @@
-version: '3.8'
-
 services:
-  # MySQL Database
   mysql:
     image: mysql:8.0
     container_name: wallet-mysql
@@ -22,7 +19,6 @@ services:
       timeout: 20s
       retries: 10
 
-  # Redis Cache & Queue
   redis:
     image: redis:7-alpine
     container_name: wallet-redis
@@ -37,7 +33,6 @@ services:
       timeout: 3s
       retries: 5
 
-  # Wallet System API
   api:
     build: .
     container_name: wallet-api
@@ -45,6 +40,7 @@ services:
       - "3000:3000"
     environment:
       - NODE_ENV=development
+      - PORT=3000
       - DB_HOST=mysql
       - DB_PORT=3306
       - DB_USERNAME=root
@@ -55,6 +51,8 @@ services:
       - REDIS_PASSWORD=
       - REDIS_DB=0
       - REDIS_URL=redis://redis:6379
+      - JWT_SECRET=dev-docker-jwt-secret
+      - JWT_EXPIRES_IN=24h
     depends_on:
       mysql:
         condition: service_healthy
@@ -64,8 +62,10 @@ services:
       - wallet-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/api/v1/health"]
+      interval: 15s
       timeout: 10s
       retries: 5
+      start_period: 40s
 
 volumes:
   mysql_data:
@@ -73,4 +73,4 @@ volumes:
 
 networks:
   wallet-network:
-    driver: bridge 
+    driver: bridge

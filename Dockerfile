@@ -1,27 +1,20 @@
-# Use Node.js 18 Alpine as base image
-FROM node:18-alpine
+# syntax=docker/dockerfile:1
 
-# Set working directory
+FROM node:18-alpine AS builder
 WORKDIR /app
-
-# Copy package files
-COPY package*.json ./
-
-# Install dependencies
-RUN npm ci --only=production
-
-# Copy source code
+COPY package.json package-lock.json ./
+RUN npm ci
 COPY . .
+RUN npm run build && test -f dist/main.js
 
-# Build the application
-RUN npm run build
-
-# Expose port
+FROM node:18-alpine
+WORKDIR /app
+RUN apk add --no-cache curl
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY --from=builder /app/dist ./dist
+ENV NODE_ENV=production
 EXPOSE 3000
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD curl -f http://localhost:3000/api/v1/health || exit 1
-
-# Start the application
-CMD ["npm", "run", "start:prod"] 
+CMD ["node", "dist/main.js"]

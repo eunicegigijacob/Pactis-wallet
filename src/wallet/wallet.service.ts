@@ -51,10 +51,10 @@ export class WalletService {
   }
 
   async createWallet(
+    userId: string,
     createWalletDto: CreateWalletDto
   ): Promise<ApiResponse<Wallet>> {
     const {
-      userId,
       initialBalance = 0,
       status = WalletStatus.ACTIVE,
       currency = "USD",
@@ -159,11 +159,11 @@ export class WalletService {
     if (error instanceof OptimisticLockVersionMismatchError) {
       return true;
     }
-    const message =
-      error && typeof error === "object" && "message" in error
-        ? String((error as { message?: unknown }).message ?? "")
-        : "";
-    return message.includes("version") || message.includes("optimistic");
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      (error as { name?: string }).name === "OptimisticLockVersionMismatchError"
+    );
   }
 
   private async executeWithOptimisticLock<T>(
@@ -215,97 +215,195 @@ export class WalletService {
   }
 
   async deposit(depositDto: DepositDto): Promise<ApiResponse<Wallet>> {
-    const { walletId, amount, description, currency } = depositDto;
+    const { walletId, amount, description, currency, transactionId } =
+      depositDto;
 
     if (amount <= 0) {
       throw new BadRequestException("Invalid deposit amount");
     }
 
-    const result = await this.executeWithOptimisticLock(
+    const ledgerId = transactionId || uuidv4();
+    const preciseAmount = this.ensureDecimalPrecision(amount);
+    const expected = {
       walletId,
-      async (wallet, manager) => {
-        if (currency && currency !== wallet.currency) {
-          throw new BadRequestException("Currency mismatch");
-        }
+      amount: preciseAmount,
+      type: TransactionType.DEPOSIT,
+      targetWalletId: null as string | null,
+    };
 
-        if (!wallet.canDeposit(amount)) {
-          throw new BadRequestException(
-            "Invalid deposit amount or wallet status"
-          );
-        }
-
-        wallet.addBalance(amount);
-
-        await this.transactionService.createTransaction(
-          {
-            transactionId: uuidv4(),
-            walletId,
-            type: TransactionType.DEPOSIT,
-            amount: this.ensureDecimalPrecision(amount),
-            description,
-            currency: currency || wallet.currency,
-          },
-          manager
-        );
-
-        return wallet;
-      }
+    const existing = await this.transactionService.requireIdempotentMatch(
+      ledgerId,
+      expected
     );
 
-    await this.invalidateWalletCache(walletId);
+    if (existing) {
+      const wallet = await this.walletRepo.findOneById(walletId);
+      if (!wallet) {
+        throw new NotFoundException("Wallet not found");
+      }
+      return {
+        status: true,
+        message: "Deposit successful (idempotent)",
+        data: wallet,
+      };
+    }
 
-    return {
-      status: true,
-      message: "Deposit successful",
-      data: result,
-    };
+    try {
+      const result = await this.executeWithOptimisticLock(
+        walletId,
+        async (wallet, manager) => {
+          if (currency && currency !== wallet.currency) {
+            throw new BadRequestException("Currency mismatch");
+          }
+
+          if (!wallet.canDeposit(amount)) {
+            throw new BadRequestException(
+              "Invalid deposit amount or wallet status"
+            );
+          }
+
+          wallet.addBalance(amount);
+
+          await this.transactionService.createTransaction(
+            {
+              transactionId: ledgerId,
+              walletId,
+              type: TransactionType.DEPOSIT,
+              amount: preciseAmount,
+              description,
+              currency: currency || wallet.currency,
+            },
+            manager
+          );
+
+          return wallet;
+        }
+      );
+
+      await this.invalidateWalletCache(walletId);
+
+      return {
+        status: true,
+        message: "Deposit successful",
+        data: result,
+      };
+    } catch (error) {
+      if (isDuplicateKeyError(error)) {
+        const replayed = await this.transactionService.requireIdempotentMatch(
+          ledgerId,
+          expected
+        );
+        if (replayed) {
+          const wallet = await this.walletRepo.findOneById(walletId);
+          if (!wallet) {
+            throw new NotFoundException("Wallet not found");
+          }
+          return {
+            status: true,
+            message: "Deposit successful (idempotent)",
+            data: wallet,
+          };
+        }
+        throw new ConflictException("Duplicate idempotency key");
+      }
+      throw error;
+    }
   }
 
   async withdraw(withdrawDto: WithdrawDto): Promise<ApiResponse<Wallet>> {
-    const { walletId, amount, description, currency } = withdrawDto;
+    const { walletId, amount, description, currency, transactionId } =
+      withdrawDto;
 
     if (amount <= 0) {
       throw new BadRequestException("Invalid withdrawal amount");
     }
 
-    const result = await this.executeWithOptimisticLock(
+    const ledgerId = transactionId || uuidv4();
+    const preciseAmount = this.ensureDecimalPrecision(amount);
+    const expected = {
       walletId,
-      async (wallet, manager) => {
-        if (currency && currency !== wallet.currency) {
-          throw new BadRequestException("Currency mismatch");
-        }
+      amount: preciseAmount,
+      type: TransactionType.WITHDRAWAL,
+      targetWalletId: null as string | null,
+    };
 
-        if (!wallet.canWithdraw(amount)) {
-          throw new BadRequestException(
-            "Insufficient funds or invalid wallet status"
-          );
-        }
-
-        wallet.subtractBalance(amount);
-
-        await this.transactionService.createTransaction(
-          {
-            transactionId: uuidv4(),
-            walletId,
-            type: TransactionType.WITHDRAWAL,
-            amount: this.ensureDecimalPrecision(amount),
-            description,
-            currency: currency || wallet.currency,
-          },
-          manager
-        );
-
-        return wallet;
-      }
+    const existing = await this.transactionService.requireIdempotentMatch(
+      ledgerId,
+      expected
     );
 
-    await this.invalidateWalletCache(walletId);
+    if (existing) {
+      const wallet = await this.walletRepo.findOneById(walletId);
+      if (!wallet) {
+        throw new NotFoundException("Wallet not found");
+      }
+      return {
+        status: true,
+        message: "Withdrawal successful (idempotent)",
+        data: wallet,
+      };
+    }
 
-    return {
-      status: true,
-      message: "Withdrawal successful",
-      data: result,
-    };
+    try {
+      const result = await this.executeWithOptimisticLock(
+        walletId,
+        async (wallet, manager) => {
+          if (currency && currency !== wallet.currency) {
+            throw new BadRequestException("Currency mismatch");
+          }
+
+          if (!wallet.canWithdraw(amount)) {
+            throw new BadRequestException(
+              "Insufficient funds or invalid wallet status"
+            );
+          }
+
+          wallet.subtractBalance(amount);
+
+          await this.transactionService.createTransaction(
+            {
+              transactionId: ledgerId,
+              walletId,
+              type: TransactionType.WITHDRAWAL,
+              amount: preciseAmount,
+              description,
+              currency: currency || wallet.currency,
+            },
+            manager
+          );
+
+          return wallet;
+        }
+      );
+
+      await this.invalidateWalletCache(walletId);
+
+      return {
+        status: true,
+        message: "Withdrawal successful",
+        data: result,
+      };
+    } catch (error) {
+      if (isDuplicateKeyError(error)) {
+        const replayed = await this.transactionService.requireIdempotentMatch(
+          ledgerId,
+          expected
+        );
+        if (replayed) {
+          const wallet = await this.walletRepo.findOneById(walletId);
+          if (!wallet) {
+            throw new NotFoundException("Wallet not found");
+          }
+          return {
+            status: true,
+            message: "Withdrawal successful (idempotent)",
+            data: wallet,
+          };
+        }
+        throw new ConflictException("Duplicate idempotency key");
+      }
+      throw error;
+    }
   }
 
   async getBalance(
@@ -382,6 +480,25 @@ export class WalletService {
     const pagination = { page, limit };
 
     const result = await this.walletRepo.findWithFilters(filters, pagination);
+
+    return {
+      status: true,
+      message: "Wallets retrieved successfully",
+      data: result,
+    };
+  }
+
+  async getWalletsForUser(
+    userId: string,
+    page: number = 1,
+    limit: number = 20,
+    status?: WalletStatus,
+    currency?: string
+  ): Promise<ApiResponse<any>> {
+    const result = await this.walletRepo.findWithFilters(
+      { status, currency, userId },
+      { page, limit }
+    );
 
     return {
       status: true,

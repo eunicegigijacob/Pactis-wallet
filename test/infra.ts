@@ -1,5 +1,9 @@
 import * as net from "net";
 
+process.env.JWT_SECRET =
+  process.env.JWT_SECRET || "test-jwt-secret-key-for-ci";
+process.env.JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "24h";
+
 export function canConnect(
   host: string,
   port: number,

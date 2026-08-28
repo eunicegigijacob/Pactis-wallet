@@ -27,6 +27,7 @@ describe("TransactionService", () => {
   let walletRepository: { findOne: jest.Mock };
   let dataSource: { transaction: jest.Mock };
   let transactionsQueue: { add: jest.Mock };
+  let cacheManager: { get: jest.Mock; set: jest.Mock; del: jest.Mock };
   let manager: {
     createQueryBuilder: jest.Mock;
     create: jest.Mock;
@@ -88,6 +89,12 @@ describe("TransactionService", () => {
       add: jest.fn(),
     };
 
+    cacheManager = {
+      get: jest.fn(),
+      set: jest.fn(),
+      del: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         TransactionService,
@@ -113,7 +120,7 @@ describe("TransactionService", () => {
         },
         {
           provide: CACHE_MANAGER,
-          useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+          useValue: cacheManager,
         },
       ],
     }).compile();
@@ -155,6 +162,10 @@ describe("TransactionService", () => {
       expect(toWallet.balance).toBe(300);
       expect(result.data.transaction.status).toBe(TransactionStatus.COMPLETED);
       expect(manager.createQueryBuilder).toHaveBeenCalledTimes(2);
+      expect(cacheManager.del).toHaveBeenCalledWith(`wallet:${FROM_ID}`);
+      expect(cacheManager.del).toHaveBeenCalledWith(`wallet:balance:${FROM_ID}`);
+      expect(cacheManager.del).toHaveBeenCalledWith(`wallet:${TO_ID}`);
+      expect(cacheManager.del).toHaveBeenCalledWith(`wallet:balance:${TO_ID}`);
     });
 
     it("should throw BadRequestException if wallets are the same", async () => {
@@ -179,6 +190,10 @@ describe("TransactionService", () => {
 
       const existing = new Transaction();
       existing.transactionId = dto.transactionId;
+      existing.walletId = FROM_ID;
+      existing.targetWalletId = TO_ID;
+      existing.amount = 100;
+      existing.type = TransactionType.TRANSFER;
       existing.status = TransactionStatus.PENDING;
       existing.isCompleted = Transaction.prototype.isCompleted;
       existing.isFailed = Transaction.prototype.isFailed;
@@ -215,6 +230,125 @@ describe("TransactionService", () => {
       });
 
       await expect(service.transfer(dto)).rejects.toThrow(ConflictException);
+      expect(fromWallet.balance).toBe(400);
+      expect(toWallet.balance).toBe(200);
+    });
+
+    it("should return the original result for a completed matching replay", async () => {
+      const dto: TransferDto = {
+        fromWalletId: FROM_ID,
+        toWalletId: TO_ID,
+        amount: 100,
+        transactionId: "completed-key",
+      };
+
+      const existing = new Transaction();
+      existing.transactionId = "completed-key";
+      existing.walletId = FROM_ID;
+      existing.targetWalletId = TO_ID;
+      existing.amount = 100;
+      existing.type = TransactionType.TRANSFER;
+      existing.status = TransactionStatus.COMPLETED;
+      existing.isCompleted = Transaction.prototype.isCompleted;
+      existing.isFailed = Transaction.prototype.isFailed;
+      existing.isPending = Transaction.prototype.isPending;
+
+      transactionRepository.findOne.mockResolvedValue(existing);
+      walletRepository.findOne
+        .mockResolvedValueOnce(makeWallet(FROM_ID, 300))
+        .mockResolvedValueOnce(makeWallet(TO_ID, 300));
+
+      const result = await service.transfer(dto);
+
+      expect(result.message).toBe("Transfer completed successfully (idempotent)");
+      expect(result.data.transaction.transactionId).toBe("completed-key");
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it("should reject a failed idempotency key replay", async () => {
+      const dto: TransferDto = {
+        fromWalletId: FROM_ID,
+        toWalletId: TO_ID,
+        amount: 100,
+        transactionId: "failed-key",
+      };
+
+      const existing = new Transaction();
+      existing.transactionId = "failed-key";
+      existing.walletId = FROM_ID;
+      existing.targetWalletId = TO_ID;
+      existing.amount = 100;
+      existing.type = TransactionType.TRANSFER;
+      existing.status = TransactionStatus.FAILED;
+      existing.isCompleted = Transaction.prototype.isCompleted;
+      existing.isFailed = Transaction.prototype.isFailed;
+      existing.isPending = Transaction.prototype.isPending;
+
+      transactionRepository.findOne.mockResolvedValue(existing);
+
+      await expect(service.transfer(dto)).rejects.toThrow(
+        new BadRequestException("Previous transaction attempt failed")
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it("should reject a completed idempotency key reused with a different payload", async () => {
+      const dto: TransferDto = {
+        fromWalletId: FROM_ID,
+        toWalletId: TO_ID,
+        amount: 999,
+        transactionId: "completed-key",
+      };
+
+      const existing = new Transaction();
+      existing.transactionId = "completed-key";
+      existing.walletId = FROM_ID;
+      existing.targetWalletId = TO_ID;
+      existing.amount = 100;
+      existing.type = TransactionType.TRANSFER;
+      existing.status = TransactionStatus.COMPLETED;
+      existing.isCompleted = Transaction.prototype.isCompleted;
+      existing.isFailed = Transaction.prototype.isFailed;
+      existing.isPending = Transaction.prototype.isPending;
+
+      transactionRepository.findOne.mockResolvedValue(existing);
+
+      await expect(service.transfer(dto)).rejects.toThrow(
+        new ConflictException(
+          "Idempotency key reused with a different payload"
+        )
+      );
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    });
+
+    it("should reject a negative transfer amount", async () => {
+      await expect(
+        service.transfer({
+          fromWalletId: FROM_ID,
+          toWalletId: TO_ID,
+          amount: -10,
+        })
+      ).rejects.toThrow(new BadRequestException("Invalid transfer amount"));
+    });
+
+    it("should reject a cross-currency transfer", async () => {
+      const fromWallet = makeWallet(FROM_ID, 400, { currency: "USD" });
+      const toWallet = makeWallet(TO_ID, 200, { currency: "EUR" });
+
+      transactionRepository.findOne.mockResolvedValue(null);
+      manager.createQueryBuilder
+        .mockReturnValueOnce(makeQueryBuilder(fromWallet))
+        .mockReturnValueOnce(makeQueryBuilder(toWallet));
+
+      await expect(
+        service.transfer({
+          fromWalletId: FROM_ID,
+          toWalletId: TO_ID,
+          amount: 50,
+        })
+      ).rejects.toThrow(
+        new BadRequestException("Currency mismatch between wallets")
+      );
       expect(fromWallet.balance).toBe(400);
       expect(toWallet.balance).toBe(200);
     });
@@ -273,6 +407,10 @@ describe("TransactionService", () => {
         expect.objectContaining({
           jobId: "queued-tx-1",
           attempts: 3,
+          backoff: {
+            type: "exponential",
+            delay: 2000,
+          },
         })
       );
       expect(result.data.transactionId).toBe("queued-tx-1");

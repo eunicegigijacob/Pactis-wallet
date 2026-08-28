@@ -18,13 +18,14 @@ describe("Queue retry and DLQ (e2e)", () => {
   let app: INestApplication;
   let transactionsQueue: Queue;
   let deadLetterQueue: Queue;
-  let infrastructureReady = false;
   let transferMock: jest.Mock;
 
   beforeAll(async () => {
-    infrastructureReady = await mysqlAndRedisAvailable();
-    if (!infrastructureReady) {
-      return;
+    const ready = await mysqlAndRedisAvailable();
+    if (!ready) {
+      throw new Error(
+        "E2E requires MySQL and Redis. Run: docker compose up -d mysql redis"
+      );
     }
 
     process.env.NODE_ENV = "test";
@@ -59,19 +60,7 @@ describe("Queue retry and DLQ (e2e)", () => {
     transferMock?.mockReset();
   });
 
-  const requireInfra = () => {
-    if (!infrastructureReady) {
-      console.warn(
-        "Skipping e2e: MySQL/Redis not reachable. Run `docker compose up -d mysql redis`."
-      );
-    }
-    return infrastructureReady;
-  };
-
   it("should retry failed background job", async () => {
-    if (!requireInfra()) {
-      return;
-    }
 
     transferMock
       .mockRejectedValueOnce(new Error("temporary outage"))
@@ -102,10 +91,6 @@ describe("Queue retry and DLQ (e2e)", () => {
   });
 
   it("should move permanently failed job to DLQ", async () => {
-    if (!requireInfra()) {
-      return;
-    }
-
     transferMock.mockRejectedValue(new Error("permanent failure"));
 
     const transactionId = uniqueId("dlq");

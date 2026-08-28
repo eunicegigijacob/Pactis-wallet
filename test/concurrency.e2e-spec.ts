@@ -1,21 +1,26 @@
 import { INestApplication } from "@nestjs/common";
 import { Test, TestingModule } from "@nestjs/testing";
+import { DataSource, EntitySubscriberInterface, UpdateEvent } from "typeorm";
 
 import { AppModule } from "../src/app.module";
 import { WalletService } from "../src/wallet/wallet.service";
 import { TransactionService } from "../src/transaction/transaction.service";
+import { Wallet } from "../src/wallet/entities/wallet.entity";
+import { Transaction } from "../src/transaction/entities/transaction.entity";
 import { mysqlAndRedisAvailable, uniqueId } from "./infra";
 
 describe("Concurrency (e2e)", () => {
   let app: INestApplication;
   let walletService: WalletService;
   let transactionService: TransactionService;
-  let infrastructureReady = false;
+  let dataSource: DataSource;
 
   beforeAll(async () => {
-    infrastructureReady = await mysqlAndRedisAvailable();
+    const infrastructureReady = await mysqlAndRedisAvailable();
     if (!infrastructureReady) {
-      return;
+      throw new Error(
+        "E2E requires MySQL and Redis. Run: docker compose up -d mysql redis"
+      );
     }
 
     process.env.NODE_ENV = "test";
@@ -29,6 +34,7 @@ describe("Concurrency (e2e)", () => {
 
     walletService = app.get(WalletService);
     transactionService = app.get(TransactionService);
+    dataSource = app.get(DataSource);
   });
 
   afterAll(async () => {
@@ -37,27 +43,12 @@ describe("Concurrency (e2e)", () => {
     }
   });
 
-  const requireInfra = () => {
-    if (!infrastructureReady) {
-      console.warn(
-        "Skipping e2e: MySQL/Redis not reachable. Run `docker compose up -d mysql redis`."
-      );
-    }
-    return infrastructureReady;
-  };
-
   it("should handle concurrent transfers", async () => {
-    if (!requireInfra()) {
-      return;
-    }
-
-    const source = await walletService.createWallet({
-      userId: uniqueId("src"),
+    const source = await walletService.createWallet(uniqueId("src"), {
       initialBalance: 100,
       currency: "USD",
     });
-    const target = await walletService.createWallet({
-      userId: uniqueId("dst"),
+    const target = await walletService.createWallet(uniqueId("dst"), {
       initialBalance: 0,
       currency: "USD",
     });
@@ -91,17 +82,11 @@ describe("Concurrency (e2e)", () => {
   });
 
   it("should not deadlock on opposite-direction concurrent transfers", async () => {
-    if (!requireInfra()) {
-      return;
-    }
-
-    const walletA = await walletService.createWallet({
-      userId: uniqueId("a"),
+    const walletA = await walletService.createWallet(uniqueId("a"), {
       initialBalance: 100,
       currency: "USD",
     });
-    const walletB = await walletService.createWallet({
-      userId: uniqueId("b"),
+    const walletB = await walletService.createWallet(uniqueId("b"), {
       initialBalance: 100,
       currency: "USD",
     });
@@ -128,5 +113,81 @@ describe("Concurrency (e2e)", () => {
 
     expect(balanceA.data.balance).toBe(85);
     expect(balanceB.data.balance).toBe(115);
+  });
+
+  it("should rollback a failed transfer so balances are unchanged", async () => {
+    const subscriber: EntitySubscriberInterface<Transaction> = {
+      listenTo: () => Transaction,
+      beforeUpdate(event: UpdateEvent<Transaction>) {
+        if (event.entity?.description === "__test_rollback__") {
+          throw new Error("forced rollback");
+        }
+      },
+    };
+    dataSource.subscribers.push(subscriber);
+
+    const source = await walletService.createWallet(uniqueId("rb-src"), {
+      initialBalance: 100,
+      currency: "USD",
+    });
+    const target = await walletService.createWallet(uniqueId("rb-dst"), {
+      initialBalance: 0,
+      currency: "USD",
+    });
+
+    try {
+      await expect(
+        transactionService.transfer({
+          fromWalletId: source.data.id,
+          toWalletId: target.data.id,
+          amount: 40,
+          description: "__test_rollback__",
+        })
+      ).rejects.toThrow("forced rollback");
+
+      const fromRow = await dataSource
+        .getRepository(Wallet)
+        .findOneBy({ id: source.data.id });
+      const toRow = await dataSource
+        .getRepository(Wallet)
+        .findOneBy({ id: target.data.id });
+
+      expect(fromRow?.balance).toBe(100);
+      expect(toRow?.balance).toBe(0);
+    } finally {
+      const index = dataSource.subscribers.indexOf(subscriber);
+      if (index >= 0) {
+        dataSource.subscribers.splice(index, 1);
+      }
+    }
+  });
+
+  it("should allow only one concurrent withdrawal to succeed", async () => {
+    const created = await walletService.createWallet(uniqueId("wd"), {
+      initialBalance: 100,
+      currency: "USD",
+    });
+
+    const results = await Promise.allSettled([
+      walletService.withdraw({
+        walletId: created.data.id,
+        amount: 80,
+        description: "concurrent-wd-a",
+      }),
+      walletService.withdraw({
+        walletId: created.data.id,
+        amount: 80,
+        description: "concurrent-wd-b",
+      }),
+    ]);
+
+    const succeeded = results.filter((r) => r.status === "fulfilled");
+    const failed = results.filter((r) => r.status === "rejected");
+
+    expect(succeeded).toHaveLength(1);
+    expect(failed).toHaveLength(1);
+
+    const balance = await walletService.getBalance(created.data.id);
+    expect(balance.data.balance).toBe(20);
   });
 });

@@ -1,88 +1,156 @@
 # Pactis Wallet
 
-A NestJS wallet API that treats money movement as a hard concurrency problem: double-spend, duplicate requests, worker crashes, and failed jobs.
+A production-oriented NestJS wallet API focused on financial correctness, concurrency control, idempotency, and reliable asynchronous transaction processing.
 
-Balances live in MySQL. Every deposit, withdrawal, and transfer writes a ledger row in the **same database transaction** as the balance update. Transfers are idempotent (`transactionId` unique key). Background transfers run on Bull with retries and a dead-letter queue.
+[![CI](https://img.shields.io/github/actions/workflow/status/eunicegigijacob/Pactis-wallet/ci.yml?branch=main&label=CI)](https://github.com/eunicegigijacob/Pactis-wallet/actions)
+[![Tests](https://img.shields.io/badge/tests-Jest%20%2B%20E2E-0f766e)](./ARCHITECTURE.md)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6)](https://www.typescriptlang.org/)
+[![NestJS](https://img.shields.io/badge/NestJS-10-e0234e)](https://nestjs.com/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ed)](./docker-compose.yml)
 
-Longer design notes: [ARCHITECTURE.md](./ARCHITECTURE.md).
+![Architecture](./docs/architecture.png)
+
+Longer design notes: [ARCHITECTURE.md](./ARCHITECTURE.md) · SVG diagram: [docs/architecture.svg](./docs/architecture.svg)
+
+## Why this project exists
+
+Moving money is not CRUD. Two withdrawals can race. A client can retry a transfer. A worker can crash after debiting one wallet. This project is a small, interview-explainable NestJS service that treats those problems as the product: locking, a ledger, idempotency keys, retries, and a dead-letter queue.
+
+## Key engineering challenges
+
+| Challenge | What the code does |
+|---|---|
+| Double-spend | Optimistic version checks on deposit/withdraw; `FOR UPDATE` on transfers |
+| Concurrent transactions | UUID-ordered wallet locks so opposite-direction transfers cannot deadlock |
+| Idempotency | Unique `transactionId`; matching replay returns the original result; mismatched payload is 409 |
+| Atomicity | Balance updates and ledger inserts share one MySQL transaction |
+| Worker failure | Crash before commit rolls back; crash after commit is a no-op replay |
+| Retries / DLQ | Exponential backoff for infra errors; 4xx discarded; exhausted jobs go to `transactions-dlq` |
+| Cache consistency | Cache-aside; invalidate after commit (both wallets on transfer) |
+| Authorization | JWT + ownership checks before returning or mutating a wallet |
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  Client[Client] --> API[NestJS API]
-  API --> MySQL[(MySQL ledger)]
-  API --> Redis[(Redis cache)]
-  API --> Bull[Bull transactions queue]
-  Bull --> Worker[TransactionProcessor]
-  Worker --> MySQL
-  Bull -->|retries exhausted| DLQ[transactions-dlq]
+```
+Client
+  → NestJS REST API
+       → Auth (bcrypt, JWT, ownership)
+       → Wallet / Transactions
+            → MySQL (users, wallets, ledger)
+            → In-process cache (cache-aside)
+            → Redis + Bull → Worker → DLQ
 ```
 
-| Piece | Role |
-|---|---|
-| NestJS API | Wallet CRUD, deposit, withdraw, sync/async transfer |
-| MySQL | Source of truth: `wallets.balance` + `wallets.version`, unique `transactions.transactionId` |
-| Redis | Cache-aside for reads; Bull broker. Never the balance store |
-| Bull worker | At-least-once async transfers; same `transfer()` path as the HTTP API |
-| DLQ | Exhausted jobs copied to `transactions-dlq` for inspection |
+MySQL is the source of truth. Redis is the Bull broker, not the balance store.
 
-### How money moves
+## Concurrency strategy
 
-- **Deposit / withdraw** — optimistic lock on `wallets.version`. Conflict → retry → re-read balance. Ledger row uses the same TypeORM `EntityManager` as the wallet `save`.
-- **Transfer** — `SELECT ... FOR UPDATE` on both wallets, locked in UUID order to avoid deadlocks, then debit + credit + ledger in one transaction.
-- **Idempotency** — unique `transactionId`. Completed replay returns the original result. A racing insert is rejected (`409`).
-- **Async transfer** — `transactionId` is assigned **before** enqueue and used as Bull `jobId`, so a worker retry cannot double-spend.
+```
+Deposit / Withdraw
+  → Optimistic locking on wallets.version
+  → Retry version conflicts (not business errors)
 
-## Hard problems
+Transfer
+  → Pessimistic locking (SELECT ... FOR UPDATE)
+  → Deterministic lock order (sort wallet UUIDs)
+```
 
-Full answers in [ARCHITECTURE.md](./ARCHITECTURE.md).
+## Idempotency
 
-**How do you prevent two simultaneous withdrawals from spending the same balance?**
-Optimistic locking on `wallets.version`. Only one `UPDATE ... WHERE version = N` wins. The loser retries, sees the new balance, and fails `canWithdraw` if funds are gone. Transfers instead take `FOR UPDATE` on both rows because two wallets must stay consistent together.
+`transactionId` is a client- or server-generated key with a unique MySQL index.
 
-**How does idempotency work?**
-`transactionId` is a client- or server-generated unique key. The MySQL unique index is the source of truth, not the pre-check. A completed replay returns the original transaction. A concurrent insert hits `ER_DUP_ENTRY` and becomes `409`. Async jobs use that same value as Bull `jobId`.
+- First request writes `PENDING` inside the same DB transaction as the balance change, then `COMPLETED`.
+- A **completed** replay with the same wallets/amount/type returns the original result.
+- The same key with a **different** payload is `409`.
+- A **failed** key cannot be reused; send a new `transactionId`.
+- Async transfers stamp `transactionId` **before** enqueue and use it as the Bull `jobId`.
 
-**What happens when the worker crashes halfway through?**
-The debit, credit, and ledger write are one MySQL transaction — they all commit or all roll back. Bull is at-least-once: a retry after a successful commit finds the `COMPLETED` row and no-ops. That requires the idempotency key to exist at enqueue time, not inside the worker.
+## Async processing
 
-**How do you recover failed transactions?**
-Three attempts with exponential backoff. After exhaustion the job is copied to `transactions-dlq` and any still-`PENDING` ledger row is marked `FAILED`. Replay is a conscious re-enqueue with a **new** key, not a silent retry of the DLQ item.
+```
+API  →  Bull (jobId = transactionId)  →  Worker (same transfer())
+                                         → retry (exponential backoff)
+                                         → DLQ when attempts are exhausted or 4xx is discarded
+```
 
-**Why optimistic vs pessimistic?**
-Deposits and withdrawals touch one row; conflicts are rare, so optimistic + retry is cheaper than holding row locks. A transfer must debit A and credit B atomically, so it uses `FOR UPDATE` plus ordered lock acquisition to prevent lost updates and deadlocks.
+## Security
 
-## Tests that prove it
+- **JWT** access tokens after login (`Authorization: Bearer`)
+- **bcrypt** password hashes; plaintext is never stored
+- **Ownership** checks on wallet and transaction routes (403 if the wallet belongs to someone else)
+- **Rate limiting** on login, deposit, withdraw, transfer, and async transfer
+- **DTO validation** (`whitelist` + `forbidNonWhitelisted`)
+- **Sanitized errors** — unknown failures become `500 Internal server error`; SQL and stacks stay in logs
+
+## Testing
 
 ```bash
 npm test          # unit tests (no Docker)
-npm run test:e2e  # concurrency + real Bull retry/DLQ (MySQL + Redis)
+npm run test:e2e  # concurrency, auth/ownership, Bull retry/DLQ (MySQL + Redis)
 ```
 
-| Test | What it proves |
+E2E tests **fail** if MySQL or Redis is not reachable.
+
+| Area | What is covered |
 |---|---|
-| should create wallet | Unique `userId`; initial balance + ledger in one transaction |
-| should deposit funds | Balance increases; ledger written via the same `EntityManager` |
-| should withdraw funds | Balance decreases; withdrawal ledger row |
-| should reject insufficient balance | `canWithdraw` fails; no ledger write |
-| should transfer funds | Pessimistic locks, both balances move, status `COMPLETED` |
-| should reject duplicate idempotency key | Unique `transactionId` → `409`; balances unchanged |
-| should rollback failed transaction | Error after mutations propagates; the DB transaction does not return success |
-| should handle concurrent transfers | Two 80-unit transfers from a 100-unit wallet: exactly one wins; opposite-direction pair does not deadlock |
-| should retry failed background job | Processor/Bull: fail twice, succeed on the third attempt |
-| should move permanently failed job to DLQ | After 3 failures the payload lands on `transactions-dlq` |
+| Auth | Register, login, invalid password, 401 without a token |
+| Authorization | Owner can read/mutate; another user gets 403 |
+| Financial | Insufficient funds, atomic transfer, forced rollback, concurrent withdraw/transfer, opposite-direction no deadlock |
+| Idempotency | Duplicate key, completed matching replay, failed replay, racing unique index |
+| Queue | Retry then success, permanent failure → DLQ, 4xx discard |
+| Cache | Hit, miss, invalidation after deposit, both wallets after transfer |
 
-E2E tests skip (with a warning) if MySQL or Redis is not reachable. Start them with:
+## API
 
-```bash
-docker compose up -d mysql redis
-npm run test:e2e
+Global prefix `/api/v1`. Swagger UI: http://localhost:3000/api/v1 (Authorize with the login token).
+
+### Auth (public)
+
+```http
+POST /api/v1/auth/register
+{ "email": "ada@example.com", "password": "correct-horse" }
+
+POST /api/v1/auth/login
+{ "email": "ada@example.com", "password": "correct-horse" }
 ```
 
-## Tech stack
+Login returns `{ accessToken, tokenType, expiresIn, user }`. Send `Authorization: Bearer <accessToken>` on the routes below.
 
-NestJS, TypeScript, MySQL 8 (TypeORM), Redis (cache-manager + Bull), class-validator, Swagger.
+### Wallets (JWT)
+
+```http
+POST /api/v1/wallets/create-wallet
+{ "initialBalance": 100.00, "currency": "USD" }
+
+GET  /api/v1/wallets/get-wallet/{walletId}
+GET  /api/v1/wallets/get-wallet-balance/{walletId}
+
+POST /api/v1/wallets/deposit
+{ "walletId": "...", "amount": 50.00, "transactionId": "optional-key" }
+
+POST /api/v1/wallets/withdraw
+{ "walletId": "...", "amount": 25.00 }
+```
+
+`userId` is taken from the JWT, not the body.
+
+### Transactions (JWT)
+
+```http
+POST /api/v1/transactions/transfer
+{ "fromWalletId": "...", "toWalletId": "...", "amount": 100.00, "transactionId": "optional-key" }
+
+POST /api/v1/transactions/transfer-async   # 202 Accepted; same body
+
+GET  /api/v1/transactions/get-transaction-history?walletId={walletId}
+GET  /api/v1/transactions/get-transaction/{transactionId}
+```
+
+### Health (public)
+
+```http
+GET /api/v1/health
+```
 
 ## Run locally
 
@@ -97,98 +165,33 @@ npm install
 npm run start:dev
 ```
 
-`docker compose up -d` also starts the API container if you want the full stack; for local `start:dev`, only `mysql` and `redis` are required.
-
 - API: http://localhost:3000
 - Swagger: http://localhost:3000/api/v1
 - Health: http://localhost:3000/api/v1/health
 
-If you prefer a host MySQL instead of Docker, create the schema once:
+Full stack (API in Docker as well):
 
 ```bash
-mysql -u root -p -e "CREATE DATABASE wallet_system;"
-mysql -u root -p wallet_system < src/database/migrations/001-create-wallets-table.sql
+docker compose up --build
 ```
 
-## API
+The Docker API image listens on `0.0.0.0:$PORT`. `JWT_SECRET` is set in `docker-compose.yml` for local use; do not reuse that value in a real deployment.
 
-Global prefix: `/api/v1`. Paths match the controllers (not a cleaned-up facade).
+## Design decisions
 
-### Wallets
+- **Optimistic vs pessimistic:** one-row mutations retry cheaply; two-row transfers must not lose updates, so they lock.
+- **UUID lock order:** prevents deadlocks when A pays B while B pays A.
+- **Idempotency in the database:** a unique index survives process crashes; an in-memory map would not.
+- **Stamp `transactionId` before enqueue:** at-least-once workers must replay the same key.
+- **Decimal amounts, not integer cents:** `decimal(15,2)` plus rounding is the current model; a cents migration was judged higher risk than value for this repo size. See [ARCHITECTURE.md](./ARCHITECTURE.md).
+- **In-process cache:** Redis is already the queue broker. Claiming a Redis cache that the code does not use would be dishonest.
 
-**Create wallet**
-```http
-POST /api/v1/wallets/create-wallet
-Content-Type: application/json
+## Future improvements
 
-{
-  "userId": "user123",
-  "initialBalance": 100.00,
-  "currency": "USD"
-}
-```
-
-**Get wallet** — `GET /api/v1/wallets/get-wallet/{walletId}`
-
-**Get wallet by user** — `GET /api/v1/wallets/get-wallet-by-user/{userId}`
-
-**Get balance** — `GET /api/v1/wallets/get-wallet-balance/{walletId}`
-
-**Deposit**
-```http
-POST /api/v1/wallets/deposit
-Content-Type: application/json
-
-{
-  "walletId": "wallet-uuid",
-  "amount": 50.00,
-  "description": "Salary deposit"
-}
-```
-
-**Withdraw**
-```http
-POST /api/v1/wallets/withdraw
-Content-Type: application/json
-
-{
-  "walletId": "wallet-uuid",
-  "amount": 25.00,
-  "description": "ATM withdrawal"
-}
-```
-
-**Update status** — `PUT /api/v1/wallets/update-wallet-status/{walletId}` with `{ "status": "suspended" }`.
-
-### Transactions
-
-**Transfer (sync)**
-```http
-POST /api/v1/transactions/transfer
-Content-Type: application/json
-
-{
-  "fromWalletId": "wallet-uuid-1",
-  "toWalletId": "wallet-uuid-2",
-  "amount": 100.00,
-  "description": "Payment for services",
-  "transactionId": "optional-idempotency-key"
-}
-```
-
-**Transfer (async)** — `202 Accepted`. Same body as above. The response includes the stamped `transactionId`.
-
-```http
-POST /api/v1/transactions/transfer-async
-```
-
-**History** — `GET /api/v1/transactions/get-transaction-history?walletId={walletId}&page=1&limit=20`
-
-**Get one** — `GET /api/v1/transactions/get-transaction/{transactionId}`
-
-**Stats** — `GET /api/v1/transactions/get-transaction-stats/{walletId}`
-
-**Failed / pending** — `GET /api/v1/transactions/get-failed-transactions`, `GET /api/v1/transactions/get-pending-transactions`
+- Integer minor units (cents) as the internal money type
+- Redis-backed cache if the API is scaled past one process
+- Outbox / replay tooling for DLQ operators
+- Stronger password policy and lockout beyond rate limits
 
 ## License
 

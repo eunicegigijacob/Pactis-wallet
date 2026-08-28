@@ -6,7 +6,7 @@ import {
   Inject,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { Repository, DataSource, EntityManager } from "typeorm";
+import { Brackets, Repository, DataSource, EntityManager } from "typeorm";
 import { InjectQueue } from "@nestjs/bull";
 import { Queue } from "bull";
 import { CACHE_MANAGER } from "@nestjs/cache-manager";
@@ -25,6 +25,10 @@ import { ApiResponse } from "../common/interfaces/api-response.interface";
 import { TransactionRepository } from "./repositories/transaction.repository";
 import { isDuplicateKeyError } from "../common/utils/database-error";
 import {
+  isClientHttpError,
+  errorMessage,
+} from "../common/utils/http-error";
+import {
   TRANSACTION_QUEUE,
   TRANSFER_JOB,
   TRANSFER_JOB_ATTEMPTS,
@@ -40,6 +44,13 @@ export interface CreateTransactionData {
   description?: string;
   currency?: string;
   metadata?: Record<string, any>;
+}
+
+export interface LedgerMatch {
+  walletId: string;
+  targetWalletId?: string | null;
+  amount: number;
+  type: TransactionType;
 }
 
 @Injectable()
@@ -77,15 +88,108 @@ export class TransactionService {
 
   async markTransactionFailed(
     transactionId: string,
-    errorMessage: string
+    errorMessageText: string
   ): Promise<void> {
     const transaction = await this.transactionRepository.findOne({
       where: { transactionId },
     });
 
     if (transaction?.isPending()) {
-      transaction.markAsFailed(errorMessage);
+      transaction.markAsFailed(errorMessageText);
       await this.transactionRepository.save(transaction);
+    }
+  }
+
+  assertSameOperation(existing: Transaction, expected: LedgerMatch): void {
+    const amountMatches =
+      Math.round(Number(existing.amount) * 100) ===
+      Math.round(expected.amount * 100);
+    const existingTarget = existing.targetWalletId ?? null;
+    const expectedTarget = expected.targetWalletId ?? null;
+
+    if (
+      existing.walletId !== expected.walletId ||
+      existingTarget !== expectedTarget ||
+      !amountMatches ||
+      existing.type !== expected.type
+    ) {
+      throw new ConflictException(
+        "Idempotency key reused with a different payload"
+      );
+    }
+  }
+
+  async requireIdempotentMatch(
+    transactionId: string | undefined,
+    expected: LedgerMatch
+  ): Promise<Transaction | null> {
+    if (!transactionId) {
+      return null;
+    }
+
+    const existing = await this.transactionRepository.findOne({
+      where: { transactionId },
+    });
+
+    if (!existing) {
+      return null;
+    }
+
+    this.assertSameOperation(existing, expected);
+
+    if (existing.isCompleted()) {
+      return existing;
+    }
+
+    if (existing.isFailed()) {
+      throw new BadRequestException("Previous transaction attempt failed");
+    }
+
+    throw new ConflictException("Duplicate idempotency key");
+  }
+
+  private async persistFailedTransfer(
+    transactionId: string,
+    transferDto: TransferDto,
+    error: unknown
+  ): Promise<void> {
+    const existing = await this.transactionRepository.findOne({
+      where: { transactionId },
+    });
+    if (existing) {
+      if (existing.isPending()) {
+        existing.markAsFailed(errorMessage(error));
+        await this.transactionRepository.save(existing);
+      }
+      return;
+    }
+
+    const fromWallet = await this.walletRepository.findOne({
+      where: { id: transferDto.fromWalletId },
+    });
+    if (!fromWallet) {
+      return;
+    }
+
+    const toWallet = await this.walletRepository.findOne({
+      where: { id: transferDto.toWalletId },
+    });
+
+    try {
+      const failed = this.transactionRepository.create({
+        transactionId,
+        walletId: transferDto.fromWalletId,
+        targetWalletId: toWallet ? transferDto.toWalletId : null,
+        type: TransactionType.TRANSFER,
+        amount: transferDto.amount,
+        description: transferDto.description,
+        currency: transferDto.currency || fromWallet.currency,
+        status: TransactionStatus.FAILED,
+        errorMessage: errorMessage(error),
+      });
+      await this.transactionRepository.save(failed);
+    } catch {
+      // Best-effort audit row; never mask the original business error.
     }
   }
 
@@ -130,7 +234,7 @@ export class TransactionService {
   private async completedTransferResponse(
     transaction: Transaction,
     fromWalletId: string,
-    toWalletId: string,
+    toWalletId: string | null,
     idempotent = false
   ): Promise<
     ApiResponse<{
@@ -142,9 +246,11 @@ export class TransactionService {
     const fromWallet = await this.walletRepository.findOne({
       where: { id: fromWalletId },
     });
-    const toWallet = await this.walletRepository.findOne({
-      where: { id: toWalletId },
-    });
+    const toWallet = toWalletId
+      ? await this.walletRepository.findOne({
+          where: { id: toWalletId },
+        })
+      : null;
 
     return {
       status: true,
@@ -175,27 +281,30 @@ export class TransactionService {
       throw new BadRequestException("Cannot transfer to the same wallet");
     }
 
-    const finalTransactionId = transactionId || uuidv4();
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException("Invalid transfer amount");
+    }
 
-    const existingTransaction = await this.transactionRepository.findOne({
-      where: { transactionId: finalTransactionId },
-    });
+    const finalTransactionId = transactionId || uuidv4();
+    const expected: LedgerMatch = {
+      walletId: fromWalletId,
+      targetWalletId: toWalletId,
+      amount,
+      type: TransactionType.TRANSFER,
+    };
+
+    const existingTransaction = await this.requireIdempotentMatch(
+      finalTransactionId,
+      expected
+    );
 
     if (existingTransaction) {
-      if (existingTransaction.isCompleted()) {
-        return this.completedTransferResponse(
-          existingTransaction,
-          fromWalletId,
-          toWalletId,
-          true
-        );
-      }
-
-      if (existingTransaction.isFailed()) {
-        throw new BadRequestException("Previous transfer attempt failed");
-      }
-
-      throw new ConflictException("Duplicate idempotency key");
+      return this.completedTransferResponse(
+        existingTransaction,
+        existingTransaction.walletId,
+        existingTransaction.targetWalletId,
+        true
+      );
     }
 
     try {
@@ -212,6 +321,14 @@ export class TransactionService {
 
         if (!toWallet) {
           throw new NotFoundException("Target wallet not found");
+        }
+
+        if (fromWallet.currency !== toWallet.currency) {
+          throw new BadRequestException("Currency mismatch between wallets");
+        }
+
+        if (currency && currency !== fromWallet.currency) {
+          throw new BadRequestException("Currency mismatch");
         }
 
         if (!fromWallet.canWithdraw(amount)) {
@@ -235,7 +352,6 @@ export class TransactionService {
           status: TransactionStatus.PENDING,
         });
 
-        // Unique index on transactionId is the race lock for concurrent duplicates.
         await manager.save(transaction);
 
         fromWallet.subtractBalance(amount);
@@ -264,15 +380,20 @@ export class TransactionService {
         });
 
         if (raced?.isCompleted()) {
+          this.assertSameOperation(raced, expected);
           return this.completedTransferResponse(
             raced,
-            fromWalletId,
-            toWalletId,
+            raced.walletId,
+            raced.targetWalletId,
             true
           );
         }
 
         throw new ConflictException("Duplicate idempotency key");
+      }
+
+      if (isClientHttpError(error)) {
+        await this.persistFailedTransfer(finalTransactionId, transferDto, error);
       }
 
       throw error;
@@ -301,8 +422,14 @@ export class TransactionService {
 
     const queryBuilder = this.transactionRepository
       .createQueryBuilder("transaction")
-      .where("transaction.walletId = :walletId", { walletId })
-      .orWhere("transaction.targetWalletId = :walletId", { walletId })
+      .where(
+        new Brackets((qb) => {
+          qb.where("transaction.walletId = :walletId", { walletId }).orWhere(
+            "transaction.targetWalletId = :walletId",
+            { walletId }
+          );
+        })
+      )
       .orderBy("transaction.createdAt", "DESC")
       .skip(skip)
       .take(limit);
@@ -439,7 +566,8 @@ export class TransactionService {
 
   async getFailedTransactions(
     page: number = 1,
-    limit: number = 20
+    limit: number = 20,
+    userId?: string
   ): Promise<
     ApiResponse<{
       items: Transaction[];
@@ -457,12 +585,21 @@ export class TransactionService {
 
     const queryBuilder = this.transactionRepository
       .createQueryBuilder("transaction")
+      .leftJoin("transaction.wallet", "wallet")
+      .leftJoin("transaction.targetWallet", "targetWallet")
       .where("transaction.status = :status", {
         status: TransactionStatus.FAILED,
       })
       .orderBy("transaction.createdAt", "DESC")
       .skip(skip)
       .take(limit);
+
+    if (userId) {
+      queryBuilder.andWhere(
+        "(wallet.userId = :userId OR targetWallet.userId = :userId)",
+        { userId }
+      );
+    }
 
     const [items, total] = await queryBuilder.getManyAndCount();
     const totalPages = Math.ceil(total / limit);
@@ -486,7 +623,8 @@ export class TransactionService {
 
   async getPendingTransactions(
     page: number = 1,
-    limit: number = 20
+    limit: number = 20,
+    userId?: string
   ): Promise<
     ApiResponse<{
       items: Transaction[];
@@ -504,12 +642,21 @@ export class TransactionService {
 
     const queryBuilder = this.transactionRepository
       .createQueryBuilder("transaction")
+      .leftJoin("transaction.wallet", "wallet")
+      .leftJoin("transaction.targetWallet", "targetWallet")
       .where("transaction.status = :status", {
         status: TransactionStatus.PENDING,
       })
       .orderBy("transaction.createdAt", "ASC")
       .skip(skip)
       .take(limit);
+
+    if (userId) {
+      queryBuilder.andWhere(
+        "(wallet.userId = :userId OR targetWallet.userId = :userId)",
+        { userId }
+      );
+    }
 
     const [items, total] = await queryBuilder.getManyAndCount();
     const totalPages = Math.ceil(total / limit);

@@ -1,15 +1,18 @@
 import {
-  Request,
   Controller,
   Get,
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import { HealthService } from './health.service';
 import { ApiResponse as ApiResponseInterface } from '../common/interfaces/api-response.interface';
+import { Public } from '../auth/decorators/public.decorator';
 
 @ApiTags('Health')
+@Public()
+@SkipThrottle()
 @Controller('health')
 export class HealthController {
   constructor(

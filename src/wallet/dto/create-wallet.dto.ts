@@ -1,25 +1,25 @@
-import { IsString, IsOptional, IsNumber, Min, IsEnum } from "class-validator";
+import { IsOptional, IsNumber, Min, IsEnum, IsString } from "class-validator";
+import { ApiPropertyOptional } from "@nestjs/swagger";
 import { Transform } from "class-transformer";
 import { WalletStatus } from "../entities/wallet.entity";
 
 export class CreateWalletDto {
-  @IsString()
-  userId: string;
-
+  @ApiPropertyOptional({ example: 0, minimum: 0 })
   @IsOptional()
   @IsNumber()
   @Min(0)
   @Transform(({ value }) => {
-    // Ensure proper decimal handling
     const num = parseFloat(value);
-    return Math.round(num * 100) / 100; // Round to 2 decimal places
+    return Math.round(num * 100) / 100;
   })
   initialBalance?: number;
 
+  @ApiPropertyOptional({ enum: WalletStatus })
   @IsOptional()
   @IsEnum(WalletStatus)
   status?: WalletStatus;
 
+  @ApiPropertyOptional({ example: "USD" })
   @IsOptional()
   @IsString()
   currency?: string;
