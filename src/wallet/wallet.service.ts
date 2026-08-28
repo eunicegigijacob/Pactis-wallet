@@ -3,12 +3,17 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  Inject,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { Repository, DataSource, QueryFailedError } from "typeorm";
+import {
+  Repository,
+  DataSource,
+  EntityManager,
+  OptimisticLockVersionMismatchError,
+} from "typeorm";
 import { CACHE_MANAGER } from "@nestjs/cache-manager";
 import { Cache } from "cache-manager";
-import { Inject } from "@nestjs/common";
 import { v4 as uuidv4 } from "uuid";
 
 import { Wallet, WalletStatus } from "./entities/wallet.entity";
@@ -19,6 +24,7 @@ import { TransactionService } from "../transaction/transaction.service";
 import { TransactionType } from "../transaction/entities/transaction.entity";
 import { WalletRepository } from "./repositories/wallet.repository";
 import { ApiResponse } from "../common/interfaces/api-response.interface";
+import { isDuplicateKeyError } from "../common/utils/database-error";
 
 @Injectable()
 export class WalletService {
@@ -54,35 +60,50 @@ export class WalletService {
       currency = "USD",
     } = createWalletDto;
 
-    // Check if wallet already exists for this user
-    const existingWallet = await this.walletRepo.findByUserId(userId);
+    let wallet: Wallet;
 
-    if (existingWallet) {
-      throw new ConflictException("Wallet already exists for this user");
-    }
+    try {
+      wallet = await this.dataSource.transaction(async (manager) => {
+        const existingWallet = await manager.findOne(Wallet, {
+          where: { userId },
+        });
 
-    // Create new wallet
-    const wallet = await this.walletRepo.create({
-      userId,
-      balance: initialBalance,
-      status,
-      currency,
-    });
+        if (existingWallet) {
+          throw new ConflictException("Wallet already exists for this user");
+        }
 
-    // Cache the wallet
-    await this.cacheWallet(wallet);
+        const created = manager.create(Wallet, {
+          userId,
+          balance: initialBalance,
+          status,
+          currency,
+        });
+        const saved = await manager.save(created);
 
-    // If initial balance > 0, create initial deposit transaction
-    if (initialBalance > 0) {
-      await this.transactionService.createTransaction({
-        transactionId: uuidv4(),
-        walletId: wallet.id,
-        type: TransactionType.DEPOSIT,
-        amount: initialBalance,
-        description: "Initial wallet balance",
-        currency,
+        if (initialBalance > 0) {
+          await this.transactionService.createTransaction(
+            {
+              transactionId: uuidv4(),
+              walletId: saved.id,
+              type: TransactionType.DEPOSIT,
+              amount: initialBalance,
+              description: "Initial wallet balance",
+              currency,
+            },
+            manager
+          );
+        }
+
+        return saved;
       });
+    } catch (error) {
+      if (isDuplicateKeyError(error)) {
+        throw new ConflictException("Wallet already exists for this user");
+      }
+      throw error;
     }
+
+    await this.cacheWallet(wallet);
 
     return {
       status: true,
@@ -134,15 +155,25 @@ export class WalletService {
     };
   }
 
+  private isOptimisticLockError(error: unknown): boolean {
+    if (error instanceof OptimisticLockVersionMismatchError) {
+      return true;
+    }
+    const message =
+      error && typeof error === "object" && "message" in error
+        ? String((error as { message?: unknown }).message ?? "")
+        : "";
+    return message.includes("version") || message.includes("optimistic");
+  }
+
   private async executeWithOptimisticLock<T>(
     walletId: string,
-    operation: (wallet: Wallet) => Promise<T>
+    operation: (wallet: Wallet, manager: EntityManager) => Promise<T>
   ): Promise<T> {
-    let lastError: Error;
+    let lastError: unknown;
 
     for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
       try {
-        // Get the current wallet state
         const wallet = await this.walletRepository.findOne({
           where: { id: walletId },
         });
@@ -150,9 +181,7 @@ export class WalletService {
           throw new NotFoundException("Wallet not found");
         }
 
-        // Execute the operation with optimistic locking
         return await this.dataSource.transaction(async (manager) => {
-          // Re-fetch wallet with current version for optimistic locking
           const currentWallet = await manager.findOne(Wallet, {
             where: { id: walletId },
             lock: { mode: "optimistic", version: wallet.version },
@@ -162,30 +191,19 @@ export class WalletService {
             throw new NotFoundException("Wallet not found");
           }
 
-          // Execute the operation
-          const result = await operation(currentWallet);
-
-          // Save the wallet (this will increment the version)
+          const result = await operation(currentWallet, manager);
           await manager.save(currentWallet);
-
           return result;
         });
       } catch (error) {
         lastError = error;
 
-        // Check if it's a version conflict (optimistic lock failure)
-        if (
-          error.message.includes("version") ||
-          error.message.includes("optimistic")
-        ) {
-          if (attempt < this.MAX_RETRIES) {
-            const delay = this.RETRY_DELAY * Math.pow(2, attempt - 1);
-            await new Promise((resolve) => setTimeout(resolve, delay));
-            continue;
-          }
+        if (this.isOptimisticLockError(error) && attempt < this.MAX_RETRIES) {
+          const delay = this.RETRY_DELAY * Math.pow(2, attempt - 1);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
         }
 
-        // If it's not a version conflict, throw immediately
         throw error;
       }
     }
@@ -205,7 +223,7 @@ export class WalletService {
 
     const result = await this.executeWithOptimisticLock(
       walletId,
-      async (wallet) => {
+      async (wallet, manager) => {
         if (currency && currency !== wallet.currency) {
           throw new BadRequestException("Currency mismatch");
         }
@@ -218,20 +236,22 @@ export class WalletService {
 
         wallet.addBalance(amount);
 
-        await this.transactionService.createTransaction({
-          transactionId: uuidv4(),
-          walletId,
-          type: TransactionType.DEPOSIT,
-          amount: this.ensureDecimalPrecision(amount),
-          description,
-          currency: currency || wallet.currency,
-        });
+        await this.transactionService.createTransaction(
+          {
+            transactionId: uuidv4(),
+            walletId,
+            type: TransactionType.DEPOSIT,
+            amount: this.ensureDecimalPrecision(amount),
+            description,
+            currency: currency || wallet.currency,
+          },
+          manager
+        );
 
         return wallet;
       }
     );
 
-    // Invalidate cache AFTER transaction success
     await this.invalidateWalletCache(walletId);
 
     return {
@@ -250,7 +270,7 @@ export class WalletService {
 
     const result = await this.executeWithOptimisticLock(
       walletId,
-      async (wallet) => {
+      async (wallet, manager) => {
         if (currency && currency !== wallet.currency) {
           throw new BadRequestException("Currency mismatch");
         }
@@ -263,20 +283,22 @@ export class WalletService {
 
         wallet.subtractBalance(amount);
 
-        await this.transactionService.createTransaction({
-          transactionId: uuidv4(),
-          walletId,
-          type: TransactionType.WITHDRAWAL,
-          amount: this.ensureDecimalPrecision(amount),
-          description,
-          currency: currency || wallet.currency,
-        });
+        await this.transactionService.createTransaction(
+          {
+            transactionId: uuidv4(),
+            walletId,
+            type: TransactionType.WITHDRAWAL,
+            amount: this.ensureDecimalPrecision(amount),
+            description,
+            currency: currency || wallet.currency,
+          },
+          manager
+        );
 
         return wallet;
       }
     );
 
-    // Invalidate cache AFTER transaction success
     await this.invalidateWalletCache(walletId);
 
     return {

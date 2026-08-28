@@ -3,11 +3,14 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  Inject,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { Repository, DataSource } from "typeorm";
+import { Repository, DataSource, EntityManager } from "typeorm";
 import { InjectQueue } from "@nestjs/bull";
 import { Queue } from "bull";
+import { CACHE_MANAGER } from "@nestjs/cache-manager";
+import { Cache } from "cache-manager";
 import { v4 as uuidv4 } from "uuid";
 
 import {
@@ -20,6 +23,13 @@ import { TransferDto } from "./dto/transfer.dto";
 import { TransactionHistoryDto } from "./dto/transaction-history.dto";
 import { ApiResponse } from "../common/interfaces/api-response.interface";
 import { TransactionRepository } from "./repositories/transaction.repository";
+import { isDuplicateKeyError } from "../common/utils/database-error";
+import {
+  TRANSACTION_QUEUE,
+  TRANSFER_JOB,
+  TRANSFER_JOB_ATTEMPTS,
+  TRANSFER_JOB_BACKOFF_MS,
+} from "../queue/queue.constants";
 
 export interface CreateTransactionData {
   transactionId: string;
@@ -40,17 +50,109 @@ export class TransactionService {
     @InjectRepository(Wallet)
     private readonly walletRepository: Repository<Wallet>,
     private readonly dataSource: DataSource,
-    @InjectQueue("transactions") private transactionsQueue: Queue,
-    private readonly transactionRepo: TransactionRepository
+    @InjectQueue(TRANSACTION_QUEUE) private transactionsQueue: Queue,
+    private readonly transactionRepo: TransactionRepository,
+    @Inject(CACHE_MANAGER) private cacheManager: Cache
   ) {}
 
-  async createTransaction(data: CreateTransactionData): Promise<Transaction> {
-    const transaction = this.transactionRepository.create({
+  private async invalidateWalletCache(walletId: string): Promise<void> {
+    await this.cacheManager.del(`wallet:${walletId}`);
+    await this.cacheManager.del(`wallet:balance:${walletId}`);
+  }
+
+  async createTransaction(
+    data: CreateTransactionData,
+    manager?: EntityManager
+  ): Promise<Transaction> {
+    const repo = manager
+      ? manager.getRepository(Transaction)
+      : this.transactionRepository;
+    const transaction = repo.create({
       ...data,
       status: TransactionStatus.COMPLETED,
     });
 
-    return await this.transactionRepository.save(transaction);
+    return await repo.save(transaction);
+  }
+
+  async markTransactionFailed(
+    transactionId: string,
+    errorMessage: string
+  ): Promise<void> {
+    const transaction = await this.transactionRepository.findOne({
+      where: { transactionId },
+    });
+
+    if (transaction?.isPending()) {
+      transaction.markAsFailed(errorMessage);
+      await this.transactionRepository.save(transaction);
+    }
+  }
+
+  private async lockWallet(
+    manager: EntityManager,
+    walletId: string
+  ): Promise<Wallet | null> {
+    return manager
+      .createQueryBuilder(Wallet, "wallet")
+      .setLock("pessimistic_write")
+      .where("wallet.id = :walletId", { walletId })
+      .getOne();
+  }
+
+  /**
+   * Lock both wallets in UUID order so A→B concurrent with B→A cannot deadlock.
+   */
+  private async lockWalletsForTransfer(
+    manager: EntityManager,
+    fromWalletId: string,
+    toWalletId: string
+  ): Promise<{ fromWallet: Wallet | null; toWallet: Wallet | null }> {
+    const [firstId, secondId] =
+      fromWalletId < toWalletId
+        ? [fromWalletId, toWalletId]
+        : [toWalletId, fromWalletId];
+
+    const first = await this.lockWallet(manager, firstId);
+    const second = await this.lockWallet(manager, secondId);
+
+    const byId = new Map<string, Wallet | null>([
+      [firstId, first],
+      [secondId, second],
+    ]);
+
+    return {
+      fromWallet: byId.get(fromWalletId) ?? null,
+      toWallet: byId.get(toWalletId) ?? null,
+    };
+  }
+
+  private async completedTransferResponse(
+    transaction: Transaction,
+    fromWalletId: string,
+    toWalletId: string,
+    idempotent = false
+  ): Promise<
+    ApiResponse<{
+      transaction: Transaction;
+      fromWallet: Wallet;
+      toWallet: Wallet;
+    }>
+  > {
+    const fromWallet = await this.walletRepository.findOne({
+      where: { id: fromWalletId },
+    });
+    const toWallet = await this.walletRepository.findOne({
+      where: { id: toWalletId },
+    });
+
+    return {
+      status: true,
+      message: idempotent
+        ? "Transfer completed successfully (idempotent)"
+        : "Transfer completed successfully",
+      data: { transaction, fromWallet, toWallet },
+    };
   }
 
   async transfer(transferDto: TransferDto): Promise<
@@ -69,77 +171,60 @@ export class TransactionService {
       transactionId,
     } = transferDto;
 
-    // Check if wallets are different
     if (fromWalletId === toWalletId) {
       throw new BadRequestException("Cannot transfer to the same wallet");
     }
 
-    // Use provided transactionId or generate new one for idempotency
     const finalTransactionId = transactionId || uuidv4();
 
-    // Check if transaction already exists (idempotency)
     const existingTransaction = await this.transactionRepository.findOne({
       where: { transactionId: finalTransactionId },
     });
 
     if (existingTransaction) {
       if (existingTransaction.isCompleted()) {
-        // Return existing successful transaction
-        const fromWallet = await this.walletRepository.findOne({
-          where: { id: fromWalletId },
-        });
-        const toWallet = await this.walletRepository.findOne({
-          where: { id: toWalletId },
-        });
-        return {
-          status: true,
-          message: "Transfer completed successfully (idempotent)",
-          data: { transaction: existingTransaction, fromWallet, toWallet },
-        };
-      } else if (existingTransaction.isFailed()) {
-        throw new BadRequestException("Previous transfer attempt failed");
-      }
-    }
-
-    const result = await this.dataSource.transaction(async (manager) => {
-      // Lock both wallets for update
-      const fromWallet = await manager
-        .createQueryBuilder(Wallet, "wallet")
-        .setLock("pessimistic_write")
-        .where("wallet.id = :walletId", { walletId: fromWalletId })
-        .getOne();
-
-      const toWallet = await manager
-        .createQueryBuilder(Wallet, "wallet")
-        .setLock("pessimistic_write")
-        .where("wallet.id = :walletId", { walletId: toWalletId })
-        .getOne();
-
-      if (!fromWallet) {
-        throw new NotFoundException("Source wallet not found");
-      }
-
-      if (!toWallet) {
-        throw new NotFoundException("Target wallet not found");
-      }
-
-      if (!fromWallet.canWithdraw(amount)) {
-        throw new BadRequestException(
-          "Insufficient funds or invalid source wallet status"
+        return this.completedTransferResponse(
+          existingTransaction,
+          fromWalletId,
+          toWalletId,
+          true
         );
       }
 
-      if (!toWallet.canDeposit(amount)) {
-        throw new BadRequestException("Invalid target wallet status");
+      if (existingTransaction.isFailed()) {
+        throw new BadRequestException("Previous transfer attempt failed");
       }
 
-      // Create or update transaction record
-      let transaction: Transaction;
-      if (existingTransaction) {
-        transaction = existingTransaction;
-        transaction.status = TransactionStatus.PENDING;
-      } else {
-        transaction = this.transactionRepository.create({
+      throw new ConflictException("Duplicate idempotency key");
+    }
+
+    try {
+      const result = await this.dataSource.transaction(async (manager) => {
+        const { fromWallet, toWallet } = await this.lockWalletsForTransfer(
+          manager,
+          fromWalletId,
+          toWalletId
+        );
+
+        if (!fromWallet) {
+          throw new NotFoundException("Source wallet not found");
+        }
+
+        if (!toWallet) {
+          throw new NotFoundException("Target wallet not found");
+        }
+
+        if (!fromWallet.canWithdraw(amount)) {
+          throw new BadRequestException(
+            "Insufficient funds or invalid source wallet status"
+          );
+        }
+
+        if (!toWallet.canDeposit(amount)) {
+          throw new BadRequestException("Invalid target wallet status");
+        }
+
+        const transaction = manager.create(Transaction, {
           transactionId: finalTransactionId,
           walletId: fromWalletId,
           targetWalletId: toWalletId,
@@ -149,26 +234,49 @@ export class TransactionService {
           currency: currency || fromWallet.currency,
           status: TransactionStatus.PENDING,
         });
+
+        // Unique index on transactionId is the race lock for concurrent duplicates.
+        await manager.save(transaction);
+
+        fromWallet.subtractBalance(amount);
+        toWallet.addBalance(amount);
+
+        await manager.save(fromWallet);
+        await manager.save(toWallet);
+        transaction.markAsCompleted();
+        await manager.save(transaction);
+
+        return { transaction, fromWallet, toWallet };
+      });
+
+      await this.invalidateWalletCache(fromWalletId);
+      await this.invalidateWalletCache(toWalletId);
+
+      return {
+        status: true,
+        message: "Transfer completed successfully",
+        data: result,
+      };
+    } catch (error) {
+      if (isDuplicateKeyError(error)) {
+        const raced = await this.transactionRepository.findOne({
+          where: { transactionId: finalTransactionId },
+        });
+
+        if (raced?.isCompleted()) {
+          return this.completedTransferResponse(
+            raced,
+            fromWalletId,
+            toWalletId,
+            true
+          );
+        }
+
+        throw new ConflictException("Duplicate idempotency key");
       }
 
-      // Update wallet balances
-      fromWallet.subtractBalance(amount);
-      toWallet.addBalance(amount);
-
-      // Save all changes
-      await manager.save(fromWallet);
-      await manager.save(toWallet);
-      transaction.markAsCompleted();
-      await manager.save(transaction);
-
-      return { transaction, fromWallet, toWallet };
-    });
-
-    return {
-      status: true,
-      message: "Transfer completed successfully",
-      data: result,
-    };
+      throw error;
+    }
   }
 
   async getTransactionHistory(query: TransactionHistoryDto): Promise<
@@ -255,22 +363,38 @@ export class TransactionService {
 
   async processTransferAsync(
     transferDto: TransferDto
-  ): Promise<ApiResponse<{ message: string }>> {
-    // Add transfer to queue for async processing
-    await this.transactionsQueue.add("transfer", transferDto, {
-      attempts: 3,
-      backoff: {
-        type: "exponential",
-        delay: 2000,
-      },
-      removeOnComplete: 100,
-      removeOnFail: 50,
-    });
+  ): Promise<ApiResponse<{ message: string; transactionId: string }>> {
+    const transactionId = transferDto.transactionId || uuidv4();
+    const payload: TransferDto = { ...transferDto, transactionId };
+
+    try {
+      await this.transactionsQueue.add(TRANSFER_JOB, payload, {
+        jobId: transactionId,
+        attempts: TRANSFER_JOB_ATTEMPTS,
+        backoff: {
+          type: "exponential",
+          delay: TRANSFER_JOB_BACKOFF_MS,
+        },
+        removeOnComplete: 100,
+        removeOnFail: false,
+      });
+    } catch (error) {
+      const message =
+        error && typeof error === "object" && "message" in error
+          ? String((error as { message?: unknown }).message ?? "")
+          : "";
+      if (!message.toLowerCase().includes("already exists")) {
+        throw error;
+      }
+    }
 
     return {
       status: true,
       message: "Transfer queued for processing",
-      data: { message: "Transfer queued for processing" },
+      data: {
+        message: "Transfer queued for processing",
+        transactionId,
+      },
     };
   }
 

@@ -1,107 +1,124 @@
-# Wallet System API
+# Pactis Wallet
 
-A comprehensive wallet system API built with NestJS, featuring transaction management, concurrency handling, caching, and message queues.
+A NestJS wallet API that treats money movement as a hard concurrency problem: double-spend, duplicate requests, worker crashes, and failed jobs.
 
-## Features
+Balances live in MySQL. Every deposit, withdrawal, and transfer writes a ledger row in the **same database transaction** as the balance update. Transfers are idempotent (`transactionId` unique key). Background transfers run on Bull with retries and a dead-letter queue.
 
-### Core Features
-- ✅ **Wallet Creation** - Create wallets with unique IDs and initial balances
-- ✅ **Deposit Funds** - Safe concurrent deposits with database locking
-- ✅ **Withdraw Funds** - Prevent overdraws with balance validation
-- ✅ **Transfer Funds** - Atomic transfers between wallets with idempotency
-- ✅ **Transaction History** - Paginated transaction history with filtering
+Longer design notes: [ARCHITECTURE.md](./ARCHITECTURE.md).
 
-### Advanced Features
-- ✅ **Concurrency & Deadlock Prevention** - Pessimistic locking for safe concurrent operations
-- ✅ **Message Queues** - Bull queue integration for async transaction processing
-- ✅ **Caching with Redis** - Cache wallet balances and transaction data
-- ✅ **Latency Optimization** - Optimized queries and caching strategies
+## Architecture
 
-## Tech Stack
+```mermaid
+flowchart LR
+  Client[Client] --> API[NestJS API]
+  API --> MySQL[(MySQL ledger)]
+  API --> Redis[(Redis cache)]
+  API --> Bull[Bull transactions queue]
+  Bull --> Worker[TransactionProcessor]
+  Worker --> MySQL
+  Bull -->|retries exhausted| DLQ[transactions-dlq]
+```
 
-- **Backend Framework**: NestJS (Node.js + TypeScript)
-- **Database**: MySQL with TypeORM
-- **Caching**: Redis with cache-manager
-- **Message Queue**: Bull (Redis-based)
-- **Validation**: class-validator
-- **Documentation**: Swagger/OpenAPI
+| Piece | Role |
+|---|---|
+| NestJS API | Wallet CRUD, deposit, withdraw, sync/async transfer |
+| MySQL | Source of truth: `wallets.balance` + `wallets.version`, unique `transactions.transactionId` |
+| Redis | Cache-aside for reads; Bull broker. Never the balance store |
+| Bull worker | At-least-once async transfers; same `transfer()` path as the HTTP API |
+| DLQ | Exhausted jobs copied to `transactions-dlq` for inspection |
 
-## Prerequisites
+### How money moves
 
-- Node.js (v16 or higher)
-- MySQL (v8.0 or higher)
-- Redis (v6.0 or higher)
+- **Deposit / withdraw** — optimistic lock on `wallets.version`. Conflict → retry → re-read balance. Ledger row uses the same TypeORM `EntityManager` as the wallet `save`.
+- **Transfer** — `SELECT ... FOR UPDATE` on both wallets, locked in UUID order to avoid deadlocks, then debit + credit + ledger in one transaction.
+- **Idempotency** — unique `transactionId`. Completed replay returns the original result. A racing insert is rejected (`409`).
+- **Async transfer** — `transactionId` is assigned **before** enqueue and used as Bull `jobId`, so a worker retry cannot double-spend.
 
-## Installation
+## Hard problems
 
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd wallet-system-api
-   ```
+Full answers in [ARCHITECTURE.md](./ARCHITECTURE.md).
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
+**How do you prevent two simultaneous withdrawals from spending the same balance?**
+Optimistic locking on `wallets.version`. Only one `UPDATE ... WHERE version = N` wins. The loser retries, sees the new balance, and fails `canWithdraw` if funds are gone. Transfers instead take `FOR UPDATE` on both rows because two wallets must stay consistent together.
 
-3. **Environment Setup**
-   ```bash
-   cp env.example .env
-   ```
-   
-   Update the `.env` file with your database and Redis credentials:
-   ```env
-   # Database Configuration
-   DB_HOST=localhost
-   DB_PORT=3306
-   DB_USERNAME=root
-   DB_PASSWORD=your_password
-   DB_DATABASE=wallet_system
+**How does idempotency work?**
+`transactionId` is a client- or server-generated unique key. The MySQL unique index is the source of truth, not the pre-check. A completed replay returns the original transaction. A concurrent insert hits `ER_DUP_ENTRY` and becomes `409`. Async jobs use that same value as Bull `jobId`.
 
-   # Redis Configuration
-   REDIS_HOST=localhost
-   REDIS_PORT=6379
-   REDIS_PASSWORD=
-   REDIS_DB=0
+**What happens when the worker crashes halfway through?**
+The debit, credit, and ledger write are one MySQL transaction — they all commit or all roll back. Bull is at-least-once: a retry after a successful commit finds the `COMPLETED` row and no-ops. That requires the idempotency key to exist at enqueue time, not inside the worker.
 
-   # Application Configuration
-   PORT=3000
-   NODE_ENV=development
-   ```
+**How do you recover failed transactions?**
+Three attempts with exponential backoff. After exhaustion the job is copied to `transactions-dlq` and any still-`PENDING` ledger row is marked `FAILED`. Replay is a conscious re-enqueue with a **new** key, not a silent retry of the DLQ item.
 
-4. **Database Setup**
-   ```bash
-   # Create database
-   mysql -u root -p -e "CREATE DATABASE wallet_system;"
-   
-   # Run migrations
-   mysql -u root -p wallet_system < src/database/migrations/001-create-wallets-table.sql
-   ```
+**Why optimistic vs pessimistic?**
+Deposits and withdrawals touch one row; conflicts are rare, so optimistic + retry is cheaper than holding row locks. A transfer must debit A and credit B atomically, so it uses `FOR UPDATE` plus ordered lock acquisition to prevent lost updates and deadlocks.
 
-5. **Start the application**
-   ```bash
-   # Development mode
-   npm run start:dev
-   
-   # Production mode
-   npm run build
-   npm run start:prod
-   ```
+## Tests that prove it
 
-## API Documentation
+```bash
+npm test          # unit tests (no Docker)
+npm run test:e2e  # concurrency + real Bull retry/DLQ (MySQL + Redis)
+```
 
-Once the application is running, visit:
-- **API Documentation**: http://localhost:3000/api/v1
-- **Health Check**: http://localhost:3000/api/v1/health
+| Test | What it proves |
+|---|---|
+| should create wallet | Unique `userId`; initial balance + ledger in one transaction |
+| should deposit funds | Balance increases; ledger written via the same `EntityManager` |
+| should withdraw funds | Balance decreases; withdrawal ledger row |
+| should reject insufficient balance | `canWithdraw` fails; no ledger write |
+| should transfer funds | Pessimistic locks, both balances move, status `COMPLETED` |
+| should reject duplicate idempotency key | Unique `transactionId` → `409`; balances unchanged |
+| should rollback failed transaction | Error after mutations propagates; the DB transaction does not return success |
+| should handle concurrent transfers | Two 80-unit transfers from a 100-unit wallet: exactly one wins; opposite-direction pair does not deadlock |
+| should retry failed background job | Processor/Bull: fail twice, succeed on the third attempt |
+| should move permanently failed job to DLQ | After 3 failures the payload lands on `transactions-dlq` |
 
-## API Endpoints
+E2E tests skip (with a warning) if MySQL or Redis is not reachable. Start them with:
+
+```bash
+docker compose up -d mysql redis
+npm run test:e2e
+```
+
+## Tech stack
+
+NestJS, TypeScript, MySQL 8 (TypeORM), Redis (cache-manager + Bull), class-validator, Swagger.
+
+## Run locally
+
+**Prerequisites:** Node.js 18+, Docker (MySQL 8 + Redis 7).
+
+```bash
+git clone <repository-url>
+cd Pactis-wallet
+cp env.example .env
+docker compose up -d mysql redis
+npm install
+npm run start:dev
+```
+
+`docker compose up -d` also starts the API container if you want the full stack; for local `start:dev`, only `mysql` and `redis` are required.
+
+- API: http://localhost:3000
+- Swagger: http://localhost:3000/api/v1
+- Health: http://localhost:3000/api/v1/health
+
+If you prefer a host MySQL instead of Docker, create the schema once:
+
+```bash
+mysql -u root -p -e "CREATE DATABASE wallet_system;"
+mysql -u root -p wallet_system < src/database/migrations/001-create-wallets-table.sql
+```
+
+## API
+
+Global prefix: `/api/v1`. Paths match the controllers (not a cleaned-up facade).
 
 ### Wallets
 
-#### Create Wallet
+**Create wallet**
 ```http
-POST /api/v1/wallets
+POST /api/v1/wallets/create-wallet
 Content-Type: application/json
 
 {
@@ -111,22 +128,13 @@ Content-Type: application/json
 }
 ```
 
-#### Get Wallet
-```http
-GET /api/v1/wallets/{walletId}
-```
+**Get wallet** — `GET /api/v1/wallets/get-wallet/{walletId}`
 
-#### Get Wallet by User ID
-```http
-GET /api/v1/wallets/user/{userId}
-```
+**Get wallet by user** — `GET /api/v1/wallets/get-wallet-by-user/{userId}`
 
-#### Get Wallet Balance
-```http
-GET /api/v1/wallets/{walletId}/balance
-```
+**Get balance** — `GET /api/v1/wallets/get-wallet-balance/{walletId}`
 
-#### Deposit Funds
+**Deposit**
 ```http
 POST /api/v1/wallets/deposit
 Content-Type: application/json
@@ -138,7 +146,7 @@ Content-Type: application/json
 }
 ```
 
-#### Withdraw Funds
+**Withdraw**
 ```http
 POST /api/v1/wallets/withdraw
 Content-Type: application/json
@@ -150,19 +158,11 @@ Content-Type: application/json
 }
 ```
 
-#### Update Wallet Status
-```http
-PUT /api/v1/wallets/{walletId}/status
-Content-Type: application/json
-
-{
-  "status": "suspended"
-}
-```
+**Update status** — `PUT /api/v1/wallets/update-wallet-status/{walletId}` with `{ "status": "suspended" }`.
 
 ### Transactions
 
-#### Transfer Funds
+**Transfer (sync)**
 ```http
 POST /api/v1/transactions/transfer
 Content-Type: application/json
@@ -176,138 +176,20 @@ Content-Type: application/json
 }
 ```
 
-#### Async Transfer
+**Transfer (async)** — `202 Accepted`. Same body as above. The response includes the stamped `transactionId`.
+
 ```http
-POST /api/v1/transactions/transfer/async
-Content-Type: application/json
-
-{
-  "fromWalletId": "wallet-uuid-1",
-  "toWalletId": "wallet-uuid-2",
-  "amount": 100.00
-}
+POST /api/v1/transactions/transfer-async
 ```
 
-#### Get Transaction History
-```http
-GET /api/v1/transactions/history?walletId={walletId}&page=1&limit=20&type=transfer
-```
+**History** — `GET /api/v1/transactions/get-transaction-history?walletId={walletId}&page=1&limit=20`
 
-#### Get Transaction
-```http
-GET /api/v1/transactions/{transactionId}
-```
+**Get one** — `GET /api/v1/transactions/get-transaction/{transactionId}`
 
-#### Get Transaction Statistics
-```http
-GET /api/v1/transactions/wallet/{walletId}/stats
-```
+**Stats** — `GET /api/v1/transactions/get-transaction-stats/{walletId}`
 
-## Concurrency Handling
-
-The system implements several mechanisms to handle concurrent operations safely:
-
-### Database-Level Locking
-- **Pessimistic Locking**: Uses `SELECT ... FOR UPDATE` to lock rows during transactions
-- **Version Control**: Optimistic locking with version columns to detect conflicts
-
-### Application-Level Protection
-- **Transaction Isolation**: All balance updates happen within database transactions
-- **Idempotency**: Transfer operations support idempotency keys to prevent duplicate processing
-
-## Caching Strategy
-
-### Redis Caching
-- **Wallet Data**: Cached for 5 minutes with automatic invalidation on updates
-- **Balance Queries**: Fast balance lookups with cache-aside pattern
-- **Transaction History**: Cached paginated results for frequently accessed data
-
-### Cache Invalidation
-- Automatic cache invalidation when wallet data is updated
-- TTL-based expiration for data freshness
-
-## Message Queue Integration
-
-### Bull Queue Features
-- **Async Processing**: Non-blocking transaction processing
-- **Retry Logic**: Exponential backoff for failed jobs
-- **Job Monitoring**: Queue statistics and job status tracking
-- **Dead Letter Queue**: Failed jobs are moved to DLQ for manual review
-
-## Performance Optimizations
-
-### Database Optimizations
-- **Indexed Queries**: Optimized indexes for common query patterns
-- **Connection Pooling**: Efficient database connection management
-- **Query Optimization**: Optimized SQL queries with proper joins
-
-### Caching Optimizations
-- **Cache-Aside Pattern**: Read-through caching for frequently accessed data
-- **Write-Through**: Immediate cache updates on data changes
-- **TTL Management**: Appropriate cache expiration times
-
-## Error Handling
-
-The API implements comprehensive error handling:
-
-- **Validation Errors**: Input validation with detailed error messages
-- **Business Logic Errors**: Proper error codes for insufficient funds, invalid states
-- **System Errors**: Graceful handling of database and external service failures
-- **Idempotency Errors**: Clear error messages for duplicate transaction attempts
-
-## Testing
-
-```bash
-# Unit tests
-npm run test
-
-# E2E tests
-npm run test:e2e
-
-# Test coverage
-npm run test:cov
-```
-
-## Monitoring
-
-### Health Checks
-- Database connectivity
-- Redis connectivity
-- Queue health status
-
-### Metrics
-- Transaction processing times
-- Cache hit rates
-- Queue job statistics
-
-## Deployment
-
-### Docker (Recommended)
-```bash
-# Build image
-docker build -t wallet-system-api .
-
-# Run container
-docker run -p 3000:3000 wallet-system-api
-```
-
-### Manual Deployment
-```bash
-# Build application
-npm run build
-
-# Start production server
-npm run start:prod
-```
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
+**Failed / pending** — `GET /api/v1/transactions/get-failed-transactions`, `GET /api/v1/transactions/get-pending-transactions`
 
 ## License
 
-This project is licensed under the MIT License. 
+MIT

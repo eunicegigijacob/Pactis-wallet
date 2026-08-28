@@ -1,10 +1,15 @@
-import { Injectable, Inject } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { InjectQueue } from "@nestjs/bull";
 import { Queue, Job, JobStatus } from "bull";
 
+import { TRANSACTION_QUEUE, TRANSACTION_DLQ } from "./queue.constants";
+
 @Injectable()
 export class QueueService {
-  constructor(@InjectQueue("transactions") private transactionsQueue: Queue) {}
+  constructor(
+    @InjectQueue(TRANSACTION_QUEUE) private transactionsQueue: Queue,
+    @InjectQueue(TRANSACTION_DLQ) private deadLetterQueue: Queue
+  ) {}
 
   async addJob<T>(
     queueName: string,
@@ -41,8 +46,10 @@ export class QueueService {
 
   private getQueue(queueName: string): Queue {
     switch (queueName) {
-      case "transactions":
+      case TRANSACTION_QUEUE:
         return this.transactionsQueue;
+      case TRANSACTION_DLQ:
+        return this.deadLetterQueue;
       default:
         throw new Error(`Unknown queue: ${queueName}`);
     }

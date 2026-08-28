@@ -68,7 +68,7 @@ export class TransactionController {
   @ApiResponse({ status: 202, description: "Transfer queued for processing" })
   async transferAsync(
     @Body() dto: TransferDto
-  ): Promise<ApiResponseInterface<{ message: string }>> {
+  ): Promise<ApiResponseInterface<{ message: string; transactionId: string }>> {
     return await this.transactionService.processTransferAsync(dto);
   }
 

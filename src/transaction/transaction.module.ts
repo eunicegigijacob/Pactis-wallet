@@ -8,13 +8,18 @@ import { Transaction } from "./entities/transaction.entity";
 import { Wallet } from "../wallet/entities/wallet.entity";
 import { TransactionProcessor } from "./transaction.processor";
 import { TransactionRepository } from "./repositories/transaction.repository";
+import {
+  TRANSACTION_QUEUE,
+  TRANSACTION_DLQ,
+} from "../queue/queue.constants";
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Transaction, Wallet]),
-    BullModule.registerQueue({
-      name: "transactions",
-    }),
+    BullModule.registerQueue(
+      { name: TRANSACTION_QUEUE },
+      { name: TRANSACTION_DLQ }
+    ),
   ],
   controllers: [TransactionController],
   providers: [TransactionService, TransactionProcessor, TransactionRepository],
